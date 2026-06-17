@@ -253,6 +253,60 @@ class U0ApiAppTests(unittest.TestCase):
         self.assertIn("field_errors", body["details"])
         self.assertNotIn("detail", body)
 
+    def test_admin_write_requires_idempotency_key_before_mutation(self):
+        response = self.client.post(
+            "/api/v1/admin/tenants/t_customer_001/feature-entitlements",
+            json={"feature_code": "MODEL_TRAINING"},
+            headers={"Authorization": "Bearer demo-platform"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        body = response.json()
+        self.assertEqual(body["code"], "IDEMP_409")
+        self.assertEqual(body["details"]["required_header"], "Idempotency-Key")
+
+        context = self.client.get(
+            "/api/v1/tenant-context",
+            headers={"Authorization": "Bearer demo-customer-a"},
+        )
+        self.assertNotIn("MODEL_TRAINING", context.json()["features"])
+
+    def test_platform_can_query_audit_logs_for_denied_admin_write(self):
+        denied = self.client.post(
+            "/api/v1/admin/tenants/t_customer_001/feature-entitlements",
+            json={"feature_code": "MODEL_TRAINING"},
+            headers={
+                "Authorization": "Bearer demo-customer-a",
+                "Idempotency-Key": "denied-audit-001",
+            },
+        )
+        response = self.client.get(
+            "/api/v1/admin/audit-logs",
+            params={"tenant_id": "t_customer_001"},
+            headers={"Authorization": "Bearer demo-platform"},
+        )
+
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(response.status_code, 200)
+        logs = response.json()["items"]
+        self.assertTrue(
+            any(
+                log["action"] == "admin_write_denied"
+                and log["code"] == "PERM_403"
+                and log["tenant_id"] == "t_customer_001"
+                for log in logs
+            )
+        )
+
+    def test_customer_cannot_query_admin_audit_logs(self):
+        response = self.client.get(
+            "/api/v1/admin/audit-logs",
+            headers={"Authorization": "Bearer demo-customer-a"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["code"], "PERM_403")
+
 
 if __name__ == "__main__":
     unittest.main()

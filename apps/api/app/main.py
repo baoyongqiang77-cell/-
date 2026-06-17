@@ -205,6 +205,18 @@ def create_app() -> FastAPI:
         )
         return _data_grant_payload(grant)
 
+    @app.get("/api/v1/admin/audit-logs", tags=["U0 基础平台"])
+    def audit_logs(
+        tenant_id: str | None = None,
+        actor: Actor = Depends(actor_from_authorization),
+        state: PlatformState = Depends(platform_state),
+    ) -> dict:
+        _require_platform_operator(state, actor)
+        logs = state.audit_logs
+        if tenant_id is not None:
+            logs = [log for log in logs if log.tenant_id == tenant_id]
+        return {"items": [_audit_log_payload(log) for log in logs]}
+
     return app
 
 
@@ -279,6 +291,19 @@ def _data_grant_payload(grant: DataGrant) -> dict:
         "purpose": sorted(grant.purposes),
         "sample_ids": sorted(grant.sample_ids),
         "status": grant.status,
+    }
+
+
+def _audit_log_payload(log) -> dict:
+    return {
+        "tenant_id": log.tenant_id,
+        "actor": log.actor,
+        "action": log.action,
+        "resource_type": log.resource_type,
+        "resource_id": log.resource_id,
+        "code": log.code,
+        "before_status": log.before_status,
+        "after_status": log.after_status,
     }
 
 

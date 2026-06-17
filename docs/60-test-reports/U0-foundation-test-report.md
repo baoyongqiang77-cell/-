@@ -23,10 +23,13 @@
 | 平台方可通过 admin API 配置客户租户功能授权 | PASS |
 | 平台方可通过 admin API 登记客户数据训练/评估授权 | PASS |
 | 客户租户访问 admin 写接口返回 `PERM_403` | PASS |
+| admin 写接口缺失 `Idempotency-Key` 返回 `IDEMP_409` 且不产生授权变更 | PASS |
 | 无效租户写请求返回 `TENANT_404` 且不污染幂等记录 | PASS |
 | 数据授权登记要求授权方和被授权方租户均存在 | PASS |
 | FastAPI/Pydantic 请求校验错误统一包装为 `MISSION_422` | PASS |
 | 参数错误响应不泄露默认 `detail` 结构，使用 `details.field_errors` | PASS |
+| 平台方可查询审计日志并按租户过滤拒绝记录 | PASS |
+| 客户租户不可查询 admin 审计日志 | PASS |
 | OpenAPI 暴露 U0 当前入口 | PASS |
 
 ## 自动化命令
