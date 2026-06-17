@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from json import dumps
+
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
+from drone_inspection.constants import FeatureCode
 from drone_inspection.errors import DomainError
-from drone_inspection.foundation import PlatformState, TenantContext
+from drone_inspection.foundation import DataGrant, PlatformState, TenantContext
 
 from .dependencies import Actor, actor_from_authorization, platform_state, resolve_tenant_context
 
@@ -27,6 +31,21 @@ ERROR_STATUS_CODES = {
     "MODEL_412": 412,
     "RUNTIME_428": 428,
 }
+
+
+class FeatureEntitlementRequest(BaseModel):
+    feature_code: FeatureCode
+
+
+class DataScopeRequest(BaseModel):
+    sample_ids: list[str] = Field(default_factory=list)
+
+
+class TenantDataGrantRequest(BaseModel):
+    owner_tenant_id: str
+    grantee_tenant_id: str
+    purpose: list[str]
+    data_scope: DataScopeRequest
 
 
 def create_app() -> FastAPI:
@@ -84,6 +103,92 @@ def create_app() -> FastAPI:
             "switchable_tenant_ids": switchable_tenant_ids,
         }
 
+    @app.post(
+        "/api/v1/admin/tenants/{tenant_id}/feature-entitlements",
+        tags=["U0 基础平台"],
+    )
+    def configure_feature_entitlement(
+        tenant_id: str,
+        payload: FeatureEntitlementRequest,
+        actor: Actor = Depends(actor_from_authorization),
+        state: PlatformState = Depends(platform_state),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        _require_platform_operator(state, actor)
+        state.tenant_context(tenant_id)
+        response = {
+            "tenant_id": tenant_id,
+            "feature_code": payload.feature_code.value,
+            "enabled": True,
+        }
+        replay = _record_idempotent(
+            state,
+            idempotency_key,
+            {
+                "action": "feature_entitlement",
+                "tenant_id": tenant_id,
+                "feature_code": payload.feature_code.value,
+            },
+            response,
+        )
+        if replay["is_replay"]:
+            return replay["response"]
+        state.enable_feature(tenant_id, payload.feature_code)
+        state.audit(
+            tenant_id=tenant_id,
+            actor=actor.id,
+            action="feature_entitlement_enabled",
+            resource_type="feature",
+            resource_id=payload.feature_code.value,
+        )
+        return response
+
+    @app.post("/api/v1/admin/tenant-data-grants", tags=["U0 基础平台"])
+    def register_tenant_data_grant(
+        payload: TenantDataGrantRequest,
+        actor: Actor = Depends(actor_from_authorization),
+        state: PlatformState = Depends(platform_state),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        _require_platform_operator(state, actor)
+        state.tenant_context(payload.owner_tenant_id)
+        state.tenant_context(payload.grantee_tenant_id)
+        response = {
+            "owner_tenant_id": payload.owner_tenant_id,
+            "grantee_tenant_id": payload.grantee_tenant_id,
+            "purpose": sorted(payload.purpose),
+            "sample_ids": sorted(payload.data_scope.sample_ids),
+            "status": "ACTIVE",
+        }
+        replay = _record_idempotent(
+            state,
+            idempotency_key,
+            {
+                "action": "tenant_data_grant",
+                "owner_tenant_id": payload.owner_tenant_id,
+                "grantee_tenant_id": payload.grantee_tenant_id,
+                "purpose": sorted(payload.purpose),
+                "sample_ids": sorted(payload.data_scope.sample_ids),
+            },
+            response,
+        )
+        if replay["is_replay"]:
+            return replay["response"]
+        grant = state.add_data_grant(
+            owner_tenant_id=payload.owner_tenant_id,
+            grantee_tenant_id=payload.grantee_tenant_id,
+            purposes=payload.purpose,
+            sample_ids=payload.data_scope.sample_ids,
+        )
+        state.audit(
+            tenant_id=grant.grantee_tenant_id,
+            actor=actor.id,
+            action="tenant_data_grant_created",
+            resource_type="tenant_data_grants",
+            resource_id=grant.owner_tenant_id,
+        )
+        return _data_grant_payload(grant)
+
     return app
 
 
@@ -98,6 +203,54 @@ def _tenant_payload(context: TenantContext) -> dict:
 
 def _feature_values(context: TenantContext) -> list[str]:
     return sorted(feature.value for feature in context.features)
+
+
+def _require_platform_operator(state: PlatformState, actor: Actor) -> None:
+    context = state.tenant_context(actor.home_tenant_id)
+    if context.tenant_type == "PLATFORM_OPERATOR":
+        return
+    state.audit(
+        tenant_id=actor.home_tenant_id,
+        actor=actor.id,
+        action="admin_write_denied",
+        resource_type="admin_api",
+        code="PERM_403",
+    )
+    raise DomainError(
+        "PERM_403",
+        "权限不足",
+        {"required_tenant_type": "PLATFORM_OPERATOR"},
+    )
+
+
+def _record_idempotent(
+    state: PlatformState,
+    idempotency_key: str | None,
+    fingerprint_parts: dict,
+    response: dict,
+) -> dict:
+    if not idempotency_key:
+        raise DomainError(
+            "IDEMP_409",
+            "缺少幂等键",
+            {"required_header": "Idempotency-Key"},
+        )
+    fingerprint = dumps(fingerprint_parts, ensure_ascii=False, sort_keys=True)
+    recorded = state.idempotency.record(idempotency_key, fingerprint, response)
+    return {
+        "response": recorded,
+        "is_replay": recorded is not response,
+    }
+
+
+def _data_grant_payload(grant: DataGrant) -> dict:
+    return {
+        "owner_tenant_id": grant.owner_tenant_id,
+        "grantee_tenant_id": grant.grantee_tenant_id,
+        "purpose": sorted(grant.purposes),
+        "sample_ids": sorted(grant.sample_ids),
+        "status": grant.status,
+    }
 
 
 app = create_app()
