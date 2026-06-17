@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>无人机智能巡检系统 Demo</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main id="login-view" class="login-shell">
+      <section class="login-panel">
+        <div class="brand-block">
+          <span class="brand-mark" aria-hidden="true">巡</span>
+          <div>
+            <h1>无人机智能巡检系统</h1>
+            <p id="environment-copy">模拟演示环境</p>
+          </div>
+        </div>
+        <form id="login-form" class="login-form">
+          <label>
+            <span>账号</span>
+            <input id="username" name="username" autocomplete="username" value="platform_admin">
+          </label>
+          <label>
+            <span>密码</span>
+            <input id="password" name="password" type="password" autocomplete="current-password" value="Demo@2026">
+          </label>
+          <button type="submit">登录演示环境</button>
+          <p id="login-error" class="error-text" role="alert"></p>
+        </form>
+        <div class="account-grid" id="account-list" aria-label="演示账号"></div>
+      </section>
+    </main>
+
+    <main id="app-view" class="app-shell hidden">
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <span class="brand-mark small" aria-hidden="true">巡</span>
+          <div>
+            <strong>智能巡检</strong>
+            <span id="tenant-type"></span>
+          </div>
+        </div>
+        <nav id="nav-list" class="nav-list" aria-label="主导航"></nav>
+        <button id="logout-button" class="ghost-button" type="button">退出</button>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p id="user-role" class="eyebrow"></p>
+            <h2 id="page-title">总览</h2>
+          </div>
+          <div class="topbar-meta">
+            <span id="test-result"></span>
+            <span id="current-tenant"></span>
+          </div>
+        </header>
+
+        <section id="notice" class="notice"></section>
+        <section id="main-panel" class="main-panel"></section>
+      </section>
+    </main>
+
+    <script src="./demo-data.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
