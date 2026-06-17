@@ -213,6 +213,46 @@ class U0ApiAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["code"], "TENANT_404")
 
+    def test_invalid_feature_code_uses_unified_validation_error(self):
+        response = self.client.post(
+            "/api/v1/admin/tenants/t_customer_001/feature-entitlements",
+            json={"feature_code": "UNREGISTERED_FEATURE"},
+            headers={
+                "Authorization": "Bearer demo-platform",
+                "Idempotency-Key": "invalid-feature-001",
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        body = response.json()
+        self.assertEqual(body["code"], "MISSION_422")
+        self.assertEqual(body["message"], "请求参数不满足接口要求")
+        self.assertTrue(body["request_id"].startswith("req_"))
+        self.assertIn("field_errors", body["details"])
+        self.assertNotIn("detail", body)
+
+    def test_missing_required_body_field_uses_unified_validation_error(self):
+        response = self.client.post(
+            "/api/v1/admin/tenant-data-grants",
+            json={
+                "owner_tenant_id": "t_customer_001",
+                "grantee_tenant_id": "t_jxjtsz_platform",
+                "data_scope": {"sample_ids": ["sample_001"]},
+            },
+            headers={
+                "Authorization": "Bearer demo-platform",
+                "Idempotency-Key": "missing-purpose-001",
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        body = response.json()
+        self.assertEqual(body["code"], "MISSION_422")
+        self.assertEqual(body["message"], "请求参数不满足接口要求")
+        self.assertTrue(body["request_id"].startswith("req_"))
+        self.assertIn("field_errors", body["details"])
+        self.assertNotIn("detail", body)
+
 
 if __name__ == "__main__":
     unittest.main()

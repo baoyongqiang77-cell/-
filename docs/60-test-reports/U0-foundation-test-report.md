@@ -25,6 +25,8 @@
 | 客户租户访问 admin 写接口返回 `PERM_403` | PASS |
 | 无效租户写请求返回 `TENANT_404` 且不污染幂等记录 | PASS |
 | 数据授权登记要求授权方和被授权方租户均存在 | PASS |
+| FastAPI/Pydantic 请求校验错误统一包装为 `MISSION_422` | PASS |
+| 参数错误响应不泄露默认 `detail` 结构，使用 `details.field_errors` | PASS |
 | OpenAPI 暴露 U0 当前入口 | PASS |
 
 ## 自动化命令

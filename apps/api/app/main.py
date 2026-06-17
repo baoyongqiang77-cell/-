@@ -3,6 +3,7 @@ from __future__ import annotations
 from json import dumps
 
 from fastapi import Depends, FastAPI, Header, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -61,6 +62,21 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=ERROR_STATUS_CODES.get(exc.code, 500),
             content=exc.to_response(),
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(
+        request: Request,
+        exc: RequestValidationError,
+    ) -> JSONResponse:
+        error = DomainError(
+            "MISSION_422",
+            "请求参数不满足接口要求",
+            {"field_errors": _validation_field_errors(exc)},
+        )
+        return JSONResponse(
+            status_code=ERROR_STATUS_CODES[error.code],
+            content=error.to_response(),
         )
 
     @app.get("/api/v1/me", tags=["U0 基础平台"])
@@ -203,6 +219,19 @@ def _tenant_payload(context: TenantContext) -> dict:
 
 def _feature_values(context: TenantContext) -> list[str]:
     return sorted(feature.value for feature in context.features)
+
+
+def _validation_field_errors(exc: RequestValidationError) -> list[dict]:
+    errors = []
+    for item in exc.errors():
+        errors.append(
+            {
+                "loc": [str(part) for part in item.get("loc", [])],
+                "message": item.get("msg", "参数错误"),
+                "type": item.get("type", "value_error"),
+            }
+        )
+    return errors
 
 
 def _require_platform_operator(state: PlatformState, actor: Actor) -> None:
