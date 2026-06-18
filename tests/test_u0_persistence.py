@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, func, inspect, select
 from sqlalchemy import UniqueConstraint
 
 
@@ -16,7 +16,10 @@ sys.path.insert(0, str(ROOT / "apps" / "api"))
 sys.path.insert(0, str(ROOT / "src"))
 
 from app.database import build_session_factory, database_url
-from app.models import Base
+from app.bootstrap import bootstrap_u0
+from app.models import Base, RoleModel, TenantModel
+from app.repositories import U0Repository
+from drone_inspection.constants import FeatureCode
 
 
 EXPECTED_TABLES = {
@@ -99,6 +102,44 @@ class U0ModelTests(unittest.TestCase):
                 )
             finally:
                 engine.dispose()
+
+
+class DatabaseTestCase(unittest.TestCase):
+    def setUp(self):
+        self.session_factory = build_session_factory("sqlite+pysqlite:///:memory:")
+        Base.metadata.create_all(self.session_factory.kw["bind"])
+        self.session = self.session_factory()
+
+    def tearDown(self):
+        self.session.close()
+        self.session_factory.kw["bind"].dispose()
+
+
+class BootstrapTests(DatabaseTestCase):
+    def test_bootstrap_is_repeatable_and_preserves_fixed_defaults(self):
+        bootstrap_u0(self.session)
+        bootstrap_u0(self.session)
+
+        self.assertEqual(self.session.scalar(select(func.count(TenantModel.id))), 3)
+        self.assertEqual(self.session.scalar(select(func.count(RoleModel.code))), 8)
+        customer = U0Repository(self.session).tenant_context("t_customer_001")
+        self.assertEqual(
+            customer.features,
+            {
+                FeatureCode.FLIGHT_CONTROL,
+                FeatureCode.VISION_ANALYSIS_RESULT,
+                FeatureCode.DATA_ANNOTATION,
+            },
+        )
+
+    def test_actor_roles_are_loaded_from_current_tenant(self):
+        bootstrap_u0(self.session)
+
+        actor = U0Repository(self.session).actor(
+            "u_platform_admin", "t_jxjtsz_platform"
+        )
+
+        self.assertIn("PLATFORM_ADMIN", actor.roles)
 
 
 if __name__ == "__main__":
