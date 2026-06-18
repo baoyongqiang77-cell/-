@@ -66,6 +66,12 @@ class U0Repository:
             roles=roles,
         )
 
+    def home_actor(self, user_id: str) -> PersistedActor:
+        user = self.session.get(UserModel, user_id)
+        if user is None or user.status != "ACTIVE":
+            raise DomainError("AUTH_401", "未认证或 Token 过期")
+        return self.actor(user_id, user.home_tenant_id)
+
     def tenant_context(self, tenant_id: str) -> TenantContext:
         tenant = self.session.get(TenantModel, tenant_id)
         if tenant is None:
@@ -93,6 +99,12 @@ class U0Repository:
         ):
             return [actor.home_tenant_id]
         return list(self.session.scalars(select(TenantModel.id).order_by(TenantModel.id)))
+
+    def audit_logs(self, tenant_id: str | None = None) -> list[AuditLogModel]:
+        statement = select(AuditLogModel).order_by(AuditLogModel.id)
+        if tenant_id is not None:
+            statement = statement.where(AuditLogModel.tenant_id == tenant_id)
+        return list(self.session.scalars(statement))
 
     def require_role(self, actor: PersistedActor, allowed: set[str]) -> None:
         if allowed.intersection(actor.roles):

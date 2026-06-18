@@ -1,13 +1,22 @@
 import os
 import sys
 import unittest
+import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+warnings.filterwarnings(
+    "ignore",
+    message="Using `httpx` with `starlette.testclient` is deprecated.*",
+    category=Warning,
+    module="fastapi.testclient",
+)
+
 from alembic import command
 from alembic.config import Config
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, inspect, select
 from sqlalchemy import UniqueConstraint
 
@@ -18,6 +27,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from app.database import build_session_factory, database_url
 from app.bootstrap import bootstrap_u0
+from app.main import create_app
 from app.models import (
     AuditLogModel,
     Base,
@@ -378,6 +388,58 @@ class AuditTransactionTests(DatabaseTestCase):
                 ),
                 0,
             )
+
+
+class ApiPersistenceTests(unittest.TestCase):
+    def test_app_startup_rejects_unmigrated_database(self):
+        with TemporaryDirectory() as temp_dir:
+            database_path = (Path(temp_dir) / "unmigrated.db").as_posix()
+            url = f"sqlite+pysqlite:///{database_path}"
+
+            with self.assertRaisesRegex(RuntimeError, "database migration"):
+                with TestClient(create_app(database_url_override=url)):
+                    pass
+
+    def test_feature_entitlement_and_idempotency_survive_app_restart(self):
+        with TemporaryDirectory() as temp_dir:
+            database_path = (Path(temp_dir) / "restart.db").as_posix()
+            url = f"sqlite+pysqlite:///{database_path}"
+            config = Config(str(ROOT / "alembic.ini"))
+            config.set_main_option("sqlalchemy.url", url)
+            command.upgrade(config, "head")
+            factory = build_session_factory(url)
+            try:
+                with factory() as session:
+                    bootstrap_u0(session)
+
+                headers = {
+                    "Authorization": "Bearer demo-platform",
+                    "Idempotency-Key": "restart-feature-key",
+                }
+                with TestClient(create_app(database_url_override=url)) as first_client:
+                    first = first_client.post(
+                        "/api/v1/admin/tenants/t_customer_001/feature-entitlements",
+                        json={"feature_code": "MODEL_TRAINING"},
+                        headers=headers,
+                    )
+                    self.assertEqual(first.status_code, 200)
+
+                with TestClient(create_app(database_url_override=url)) as second_client:
+                    replay = second_client.post(
+                        "/api/v1/admin/tenants/t_customer_001/feature-entitlements",
+                        json={"feature_code": "MODEL_TRAINING"},
+                        headers=headers,
+                    )
+                    context = second_client.get(
+                        "/api/v1/tenant-context",
+                        headers={"Authorization": "Bearer demo-customer-a"},
+                    )
+
+                self.assertEqual(replay.status_code, 200)
+                self.assertEqual(replay.json(), first.json())
+                self.assertIn("MODEL_TRAINING", context.json()["features"])
+            finally:
+                factory.kw["bind"].dispose()
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import sys
 import unittest
 import warnings
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 warnings.filterwarnings(
     "ignore",
@@ -17,11 +18,27 @@ sys.path.insert(0, str(ROOT / "apps" / "api"))
 sys.path.insert(0, str(ROOT / "src"))
 
 from app.main import create_app
+from app.bootstrap import bootstrap_u0
+from app.database import build_session_factory
+from app.models import Base
 
 
 class U0ApiAppTests(unittest.TestCase):
     def setUp(self):
-        self.client = TestClient(create_app())
+        self.temp_dir = TemporaryDirectory()
+        database_path = (Path(self.temp_dir.name) / "api.db").as_posix()
+        self.database_url = f"sqlite+pysqlite:///{database_path}"
+        self.session_factory = build_session_factory(self.database_url)
+        Base.metadata.create_all(self.session_factory.kw["bind"])
+        with self.session_factory() as session:
+            bootstrap_u0(session)
+        self.client = TestClient(create_app(database_url_override=self.database_url))
+
+    def tearDown(self):
+        self.client.close()
+        self.client.app.state.session_factory.kw["bind"].dispose()
+        self.session_factory.kw["bind"].dispose()
+        self.temp_dir.cleanup()
 
     def test_me_requires_authorization_and_uses_unified_error_shape(self):
         response = self.client.get("/api/v1/me")
@@ -144,7 +161,12 @@ class U0ApiAppTests(unittest.TestCase):
                 "owner_tenant_id": "t_customer_001",
                 "grantee_tenant_id": "t_jxjtsz_platform",
                 "purpose": ["training", "evaluation"],
-                "data_scope": {"sample_ids": ["sample_001", "sample_002"]},
+                "data_scope": {
+                    "asset_types": ["road"],
+                    "sample_ids": ["sample_001", "sample_002"],
+                },
+                "effective_from": "2026-06-18T00:00:00Z",
+                "expires_at": "2027-06-18T00:00:00Z",
             },
             headers={
                 "Authorization": "Bearer demo-platform",
@@ -172,7 +194,7 @@ class U0ApiAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         body = response.json()
         self.assertEqual(body["code"], "PERM_403")
-        self.assertEqual(body["details"]["required_tenant_type"], "PLATFORM_OPERATOR")
+        self.assertEqual(body["details"]["required_roles"], ["PLATFORM_ADMIN"])
 
     def test_invalid_tenant_does_not_poison_idempotency_record(self):
         headers = {
@@ -202,7 +224,12 @@ class U0ApiAppTests(unittest.TestCase):
                 "owner_tenant_id": "t_missing",
                 "grantee_tenant_id": "t_jxjtsz_platform",
                 "purpose": ["training"],
-                "data_scope": {"sample_ids": ["sample_001"]},
+                "data_scope": {
+                    "asset_types": ["road"],
+                    "sample_ids": ["sample_001"],
+                },
+                "effective_from": "2026-06-18T00:00:00Z",
+                "expires_at": "2027-06-18T00:00:00Z",
             },
             headers={
                 "Authorization": "Bearer demo-platform",

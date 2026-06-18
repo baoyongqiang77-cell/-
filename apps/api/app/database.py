@@ -32,7 +32,11 @@ def build_session_factory(url: str) -> sessionmaker[Session]:
 
 def session_dependency(request: Request) -> Generator[Session, None, None]:
     session = request.app.state.session_factory()
+    request.state.db_session = session
     try:
         yield session
+    except Exception:
+        session.rollback()
+        raise
     finally:
         session.close()
