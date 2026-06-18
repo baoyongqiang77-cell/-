@@ -15,11 +15,18 @@ class ErrorResponse:
 class DomainError(Exception):
     """Project-wide domain error using the required response shape."""
 
-    def __init__(self, code: str, message: str, details: dict | None = None):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        details: dict | None = None,
+        *,
+        request_id: str | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.message = message
-        self.request_id = f"req_{uuid4().hex[:8]}"
+        self.request_id = request_id or f"req_{uuid4().hex[:8]}"
         self.details = details or {}
 
     def to_response(self) -> dict:
@@ -35,4 +42,3 @@ class DomainError(Exception):
             "request_id": response.request_id,
             "details": response.details,
         }
-

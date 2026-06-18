@@ -244,6 +244,30 @@ class U0Repository:
         self.session.add(record)
         return record
 
+    @staticmethod
+    def commit_denial_audit(
+        session_factory,
+        tenant_id: str,
+        actor: str,
+        action: str,
+        resource_type: str,
+        request_meta: RequestMeta,
+        code: str,
+        resource_id: str | None = None,
+    ) -> None:
+        with session_factory() as audit_session:
+            repository = U0Repository(audit_session)
+            repository.audit(
+                tenant_id=tenant_id,
+                actor=actor,
+                action=action,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                request_meta=request_meta,
+                code=code,
+            )
+            audit_session.commit()
+
     def create_data_grant(
         self,
         actor: PersistedActor,

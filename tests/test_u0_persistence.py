@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from app.database import build_session_factory, database_url
 from app.bootstrap import bootstrap_u0
 from app.models import (
+    AuditLogModel,
     Base,
     IdempotencyRecordModel,
     RoleModel,
@@ -317,6 +318,66 @@ class DataGrantRepositoryTests(DatabaseTestCase):
                 now=self.now,
             )
         self.assertEqual(raised.exception.code, "DATA_GRANT_412")
+
+
+class AuditTransactionTests(DatabaseTestCase):
+    def setUp(self):
+        super().setUp()
+        bootstrap_u0(self.session)
+
+    def test_domain_error_preserves_request_id(self):
+        error = DomainError(
+            "PERM_403",
+            "权限不足",
+            request_id="req_review_001",
+        )
+
+        self.assertEqual(error.to_response()["request_id"], "req_review_001")
+
+    def test_denial_audit_commits_after_business_rollback(self):
+        repository = U0Repository(self.session)
+        customer = repository.actor("u_customer_a_operator", "t_customer_001")
+        request_meta = RequestMeta("req_denied_001", "127.0.0.1")
+
+        with self.assertRaises(DomainError) as raised:
+            repository.enable_feature(
+                customer,
+                "t_customer_001",
+                FeatureCode.MODEL_TRAINING,
+                "denied-key",
+                request_meta,
+            )
+        self.session.rollback()
+        U0Repository.commit_denial_audit(
+            self.session_factory,
+            tenant_id="t_customer_001",
+            actor=customer.id,
+            action="admin_write_denied",
+            resource_type="admin_api",
+            request_meta=request_meta,
+            code=raised.exception.code,
+        )
+
+        with self.session_factory() as verification_session:
+            audit = verification_session.scalar(
+                select(AuditLogModel).where(
+                    AuditLogModel.request_id == "req_denied_001"
+                )
+            )
+            self.assertIsNotNone(audit)
+            self.assertEqual(audit.code, "PERM_403")
+            self.assertEqual(audit.client_ip, "127.0.0.1")
+            self.assertIsNotNone(audit.created_at)
+            self.assertEqual(
+                verification_session.scalar(
+                    select(func.count(TenantFeatureEntitlementModel.id)).where(
+                        TenantFeatureEntitlementModel.tenant_id == "t_customer_001",
+                        TenantFeatureEntitlementModel.feature_code
+                        == FeatureCode.MODEL_TRAINING.value,
+                    )
+                ),
+                0,
+            )
 
 
 if __name__ == "__main__":
