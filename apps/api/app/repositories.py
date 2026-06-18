@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Callable
+from datetime import datetime, timezone
 from hashlib import sha256
 from json import dumps
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -16,6 +18,7 @@ from drone_inspection.foundation import Tenant, TenantContext
 from .models import (
     AuditLogModel,
     IdempotencyRecordModel,
+    TenantDataGrantModel,
     TenantFeatureEntitlementModel,
     TenantFeatureEntitlementModel,
     TenantModel,
@@ -241,7 +244,130 @@ class U0Repository:
         self.session.add(record)
         return record
 
+    def create_data_grant(
+        self,
+        actor: PersistedActor,
+        owner_tenant_id: str,
+        grantee_tenant_id: str,
+        purposes: list[str],
+        asset_types: list[str],
+        sample_ids: list[str],
+        effective_from: datetime,
+        expires_at: datetime,
+        idempotency_key: str | None,
+        request_meta: RequestMeta,
+    ) -> dict:
+        self.require_role(actor, {"PLATFORM_ADMIN"})
+        self.tenant_context(owner_tenant_id)
+        self.tenant_context(grantee_tenant_id)
+        effective_from = self._as_utc(effective_from)
+        expires_at = self._as_utc(expires_at)
+        if not purposes or expires_at <= effective_from:
+            raise DomainError(
+                "MISSION_422",
+                "请求参数不满足接口要求",
+                {"field_errors": ["purpose and valid grant dates are required"]},
+            )
+        normalized = {
+            "owner_tenant_id": owner_tenant_id,
+            "grantee_tenant_id": grantee_tenant_id,
+            "purpose": sorted(set(purposes)),
+            "asset_types": sorted(set(asset_types)),
+            "sample_ids": sorted(set(sample_ids)),
+            "effective_from": effective_from.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "status": "ACTIVE",
+        }
+        fingerprint = self._fingerprint({"action": "tenant_data_grant", **normalized})
+
+        def operation() -> dict:
+            grant = TenantDataGrantModel(
+                id=f"grant_{uuid4().hex}",
+                owner_tenant_id=owner_tenant_id,
+                grantee_tenant_id=grantee_tenant_id,
+                data_scope={
+                    "asset_types": normalized["asset_types"],
+                    "sample_ids": normalized["sample_ids"],
+                },
+                purpose=normalized["purpose"],
+                effective_from=effective_from,
+                expires_at=expires_at,
+                status="ACTIVE",
+            )
+            self.session.add(grant)
+            self.audit(
+                tenant_id=grantee_tenant_id,
+                actor=actor.id,
+                action="tenant_data_grant_created",
+                resource_type="tenant_data_grants",
+                resource_id=grant.id,
+                request_meta=request_meta,
+            )
+            return {"id": grant.id, **normalized}
+
+        return self.run_idempotent(
+            actor.home_tenant_id,
+            "POST",
+            "data-grant",
+            idempotency_key,
+            fingerprint,
+            operation,
+        )
+
+    def require_data_grant(
+        self,
+        owner_tenant_id: str,
+        grantee_tenant_id: str,
+        purpose: str,
+        asset_types: list[str],
+        sample_ids: list[str],
+        now: datetime | None = None,
+    ) -> bool:
+        if owner_tenant_id == grantee_tenant_id:
+            return True
+        current_time = self._as_utc(now or datetime.now(timezone.utc))
+        requested_assets = set(asset_types)
+        requested_samples = set(sample_ids)
+        grants = self.session.scalars(
+            select(TenantDataGrantModel).where(
+                TenantDataGrantModel.owner_tenant_id == owner_tenant_id,
+                TenantDataGrantModel.grantee_tenant_id == grantee_tenant_id,
+                TenantDataGrantModel.status == "ACTIVE",
+            )
+        )
+        for grant in grants:
+            effective_from = self._as_utc(grant.effective_from)
+            expires_at = self._as_utc(grant.expires_at)
+            grant_assets = set(grant.data_scope.get("asset_types", []))
+            grant_samples = set(grant.data_scope.get("sample_ids", []))
+            if (
+                effective_from <= current_time < expires_at
+                and purpose in grant.purpose
+                and requested_assets.issubset(grant_assets)
+                and requested_samples.issubset(grant_samples)
+            ):
+                return True
+        raise DomainError(
+            "DATA_GRANT_412",
+            "数据未获得训练、评估或跨租户统计授权",
+            {
+                "owner_tenant_id": owner_tenant_id,
+                "grantee_tenant_id": grantee_tenant_id,
+                "purpose": purpose,
+                "missing_scope": {
+                    "asset_types": sorted(requested_assets),
+                    "sample_ids": sorted(requested_samples),
+                },
+            },
+        )
+
     @staticmethod
     def _fingerprint(payload: dict) -> str:
         encoded = dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         return sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)

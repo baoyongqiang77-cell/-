@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -231,6 +232,91 @@ class IdempotencyRepositoryTests(DatabaseTestCase):
             ),
             1,
         )
+
+
+class DataGrantRepositoryTests(DatabaseTestCase):
+    def setUp(self):
+        super().setUp()
+        bootstrap_u0(self.session)
+        self.repository = U0Repository(self.session)
+        self.actor = self.repository.actor(
+            "u_platform_admin", "t_jxjtsz_platform"
+        )
+        self.now = datetime(2026, 6, 18, 8, 0, tzinfo=timezone.utc)
+
+    def _create_grant(
+        self,
+        effective_from: datetime | None = None,
+        expires_at: datetime | None = None,
+    ) -> None:
+        self.repository.create_data_grant(
+            actor=self.actor,
+            owner_tenant_id="t_customer_001",
+            grantee_tenant_id="t_jxjtsz_platform",
+            purposes=["training"],
+            asset_types=["road"],
+            sample_ids=["sample_001"],
+            effective_from=effective_from or self.now - timedelta(hours=1),
+            expires_at=expires_at or self.now + timedelta(days=1),
+            idempotency_key="grant-key",
+            request_meta=RequestMeta("req_grant_001", "127.0.0.1"),
+        )
+
+    def test_active_grant_allows_matching_scope(self):
+        self._create_grant()
+
+        self.assertTrue(
+            self.repository.require_data_grant(
+                owner_tenant_id="t_customer_001",
+                grantee_tenant_id="t_jxjtsz_platform",
+                purpose="training",
+                asset_types=["road"],
+                sample_ids=["sample_001"],
+                now=self.now,
+            )
+        )
+
+    def test_not_yet_effective_grant_is_denied(self):
+        self._create_grant(effective_from=self.now + timedelta(minutes=1))
+
+        self._assert_grant_denied("training", ["road"], ["sample_001"])
+
+    def test_expired_grant_is_denied(self):
+        self._create_grant(expires_at=self.now - timedelta(minutes=1))
+
+        self._assert_grant_denied("training", ["road"], ["sample_001"])
+
+    def test_wrong_purpose_is_denied(self):
+        self._create_grant()
+
+        self._assert_grant_denied("evaluation", ["road"], ["sample_001"])
+
+    def test_wrong_asset_type_is_denied(self):
+        self._create_grant()
+
+        self._assert_grant_denied("training", ["bridge"], ["sample_001"])
+
+    def test_sample_outside_scope_is_denied(self):
+        self._create_grant()
+
+        self._assert_grant_denied("training", ["road"], ["sample_002"])
+
+    def _assert_grant_denied(
+        self,
+        purpose: str,
+        asset_types: list[str],
+        sample_ids: list[str],
+    ) -> None:
+        with self.assertRaises(DomainError) as raised:
+            self.repository.require_data_grant(
+                owner_tenant_id="t_customer_001",
+                grantee_tenant_id="t_jxjtsz_platform",
+                purpose=purpose,
+                asset_types=asset_types,
+                sample_ids=sample_ids,
+                now=self.now,
+            )
+        self.assertEqual(raised.exception.code, "DATA_GRANT_412")
 
 
 if __name__ == "__main__":
