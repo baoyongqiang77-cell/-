@@ -17,9 +17,16 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from app.database import build_session_factory, database_url
 from app.bootstrap import bootstrap_u0
-from app.models import Base, RoleModel, TenantModel
-from app.repositories import U0Repository
+from app.models import (
+    Base,
+    IdempotencyRecordModel,
+    RoleModel,
+    TenantFeatureEntitlementModel,
+    TenantModel,
+)
+from app.repositories import RequestMeta, U0Repository
 from drone_inspection.constants import FeatureCode
+from drone_inspection.errors import DomainError
 
 
 EXPECTED_TABLES = {
@@ -140,6 +147,90 @@ class BootstrapTests(DatabaseTestCase):
         )
 
         self.assertIn("PLATFORM_ADMIN", actor.roles)
+
+
+class IdempotencyRepositoryTests(DatabaseTestCase):
+    def setUp(self):
+        super().setUp()
+        bootstrap_u0(self.session)
+        self.repository = U0Repository(self.session)
+
+    def test_same_key_can_be_reused_by_different_routes(self):
+        first = self.repository.run_idempotent(
+            "t_jxjtsz_platform",
+            "POST",
+            "feature-entitlement",
+            "same-key",
+            "fingerprint-1",
+            lambda: {"kind": "feature"},
+        )
+        second = self.repository.run_idempotent(
+            "t_jxjtsz_platform",
+            "POST",
+            "data-grant",
+            "same-key",
+            "fingerprint-2",
+            lambda: {"kind": "grant"},
+        )
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(
+            self.session.scalar(select(func.count(IdempotencyRecordModel.id))),
+            2,
+        )
+
+    def test_conflicting_fingerprint_raises_idemp_409(self):
+        self.repository.run_idempotent(
+            "t_jxjtsz_platform",
+            "POST",
+            "feature-entitlement",
+            "conflict-key",
+            "fingerprint-1",
+            lambda: {"ok": True},
+        )
+
+        with self.assertRaises(DomainError) as raised:
+            self.repository.run_idempotent(
+                "t_jxjtsz_platform",
+                "POST",
+                "feature-entitlement",
+                "conflict-key",
+                "fingerprint-2",
+                lambda: {"ok": False},
+            )
+
+        self.assertEqual(raised.exception.code, "IDEMP_409")
+
+    def test_platform_admin_enables_feature_once_with_replay(self):
+        actor = self.repository.actor("u_platform_admin", "t_jxjtsz_platform")
+        request_meta = RequestMeta("req_feature_001", "127.0.0.1")
+
+        first = self.repository.enable_feature(
+            actor,
+            "t_customer_001",
+            FeatureCode.MODEL_TRAINING,
+            "feature-key",
+            request_meta,
+        )
+        replay = self.repository.enable_feature(
+            actor,
+            "t_customer_001",
+            FeatureCode.MODEL_TRAINING,
+            "feature-key",
+            request_meta,
+        )
+
+        self.assertEqual(replay, first)
+        self.assertEqual(
+            self.session.scalar(
+                select(func.count(TenantFeatureEntitlementModel.id)).where(
+                    TenantFeatureEntitlementModel.tenant_id == "t_customer_001",
+                    TenantFeatureEntitlementModel.feature_code
+                    == FeatureCode.MODEL_TRAINING.value,
+                )
+            ),
+            1,
+        )
 
 
 if __name__ == "__main__":
