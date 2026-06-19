@@ -29,7 +29,16 @@
 | 66 项项目全量自动化回归 | PASS |
 | Alembic 迁移、显式初始化、Uvicorn 启动及 OpenAPI 探测 | PASS |
 | PostgreSQL 16 Alembic 冒烟脚本语法检查 | PASS |
-| PostgreSQL 16 实机迁移冒烟 | NOT RUN：本机无 Docker 命令 |
+| PostgreSQL 16 实机迁移冒烟 | PASS：云端 Docker 测试环境，2026-06-19 |
+
+## 云端 PostgreSQL 实测证据
+
+- 环境：Ubuntu 24.04.2 LTS、Docker 29.1.3、Docker Compose 2.40.3、PostgreSQL 16 Alpine。
+- 网络：数据库端口仅绑定 `127.0.0.1:55432`，未暴露到公网。
+- 迁移：`upgrade head -> downgrade base -> upgrade head` 全流程退出码为 0。
+- 降级后仅保留 `alembic_version`；再次升级后包含八张 U0 业务表及 `alembic_version`。
+- 最终 Alembic revision：`20260618_0001 (head)`；PostgreSQL 容器状态为 `healthy`。
+- Docker Hub 在该云网络中解析异常，测试镜像通过可访问镜像代理拉取；此问题不影响迁移结果，但生产镜像源仍需按部署基线锁定。
 
 ## 复现命令
 
@@ -45,8 +54,7 @@
 - 通用数据库 5xx 错误码需要签字基线变更后才能新增。
 - PostgreSQL 冒烟成功也不代表政务云生产数据库验收通过。
 - 客户租户自助审计查询留待后续 U0 增量。
-- 本机未安装 Docker，当前不能声明 PostgreSQL 迁移兼容性已实机通过。
 
 ## 结论
 
-U0 持久化增量已完成 SQLite 自动化验证和重启验证，具备继续开发后续 U0 单元的代码基础。PostgreSQL 实机冒烟仍是明确的环境待办，不计入本次已通过项。
+U0 持久化增量已完成 SQLite 自动化、应用重启及 PostgreSQL 16 实机迁移验证，具备继续开发后续 U0 单元的代码基础。该结果属于测试环境兼容性证据，不替代政务云生产数据库验收。
