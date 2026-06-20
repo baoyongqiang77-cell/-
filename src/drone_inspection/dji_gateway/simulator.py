@@ -34,6 +34,7 @@ class DjiDock3Simulator:
     def __init__(self, clock: Callable[[], datetime] | None = None):
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._bound_devices: set[str] = set()
+        self._pending_bound_events: set[str] = set()
         self._idempotency: dict[
             tuple[str, str, str],
             tuple[str, object],
@@ -122,6 +123,7 @@ class DjiDock3Simulator:
             if command.device_sn in self._bound_devices:
                 self._raise_failure("device_already_bound")
             self._bound_devices.add(command.device_sn)
+            self._pending_bound_events.add(command.device_sn)
             return self._receipt(
                 "bind_device",
                 command,
@@ -158,10 +160,16 @@ class DjiDock3Simulator:
     def sync_device_status(self, command: DeviceCommand) -> FlightEvent:
         def operation():
             self._consume_failure("sync_device_status")
+            event_code = "device_status"
+            status = "ONLINE"
+            if command.device_sn in self._pending_bound_events:
+                self._pending_bound_events.remove(command.device_sn)
+                event_code = "device_bound"
+                status = "BOUND"
             return self._event(
-                "device_status",
+                event_code,
                 command,
-                {"status": "ONLINE", "mode": self.mode.value},
+                {"status": status, "mode": self.mode.value},
             )
 
         return self._idempotent("sync_device_status", command, operation)

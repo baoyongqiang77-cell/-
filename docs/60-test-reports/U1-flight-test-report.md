@@ -18,13 +18,13 @@
 | 设备绑定与任务下发返回已接受回执，并明确标记 `SIMULATED_ONLY` | PASS |
 | 相同幂等请求重放原回执，不同指纹返回 `IDEMP_409` | PASS |
 | 绑定、遥测、低电量、媒体上传完成均转换为统一 payload | PASS |
-| 回调外层严格限定为 `event_code/event_time/device_sn/raw_payload` | PASS |
+| 回调外层严格限定为 `event_code/event_time/device_sn/raw_payload`，且 `event_time` 必须包含时区 | PASS |
 | 模拟器覆盖凭证错误、设备已绑定、格式错误、超时、设备无响应、checksum 错误 | PASS |
 | 六类故障复用 `DJI_502`/`MEDIA_499`，可重试属性固定且详情不泄露凭证 | PASS |
 | 飞行任务按文档状态合法流转，非法跳转返回 `STATE_409` | PASS |
 | 设备拒绝回执仅通过状态机从 `DISPATCHING` 进入 `DISPATCH_FAILED` | PASS |
 | 仅 `dji_gateway` 可访问互联网，业务服务被阻断 | PASS |
-| U1-F01 与现有飞控规则共 18 项聚焦测试 | PASS |
+| U1-F01 与现有飞控规则共 19 项聚焦测试 | PASS |
 
 ## 自动化命令
 

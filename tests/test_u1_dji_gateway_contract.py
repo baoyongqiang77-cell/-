@@ -40,6 +40,15 @@ class GatewayContractTests(unittest.TestCase):
             },
         )
 
+    def test_event_rejects_naive_time(self):
+        with self.assertRaises(ValueError):
+            FlightEvent(
+                event_code="telemetry",
+                event_time=datetime(2026, 6, 19, 5, 0),
+                device_sn="dock-sn-001",
+                raw_payload={},
+            )
+
     def test_commands_and_receipts_are_immutable(self):
         command = DeviceCommand(
             tenant_id="t_customer_001",
@@ -200,7 +209,8 @@ class GatewayEventTests(unittest.TestCase):
         )
 
         self.assertTrue(bound.accepted)
-        self.assertEqual(status.event_code, "device_status")
+        self.assertEqual(status.event_code, "device_bound")
+        self.assertEqual(status.raw_payload["status"], "BOUND")
         for event in (status, telemetry, low_battery, media):
             self.assertEqual(
                 set(event.to_payload()),

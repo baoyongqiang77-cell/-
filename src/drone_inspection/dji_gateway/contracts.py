@@ -64,6 +64,10 @@ class FlightEvent:
     device_sn: str
     raw_payload: dict
 
+    def __post_init__(self) -> None:
+        if self.event_time.utcoffset() is None:
+            raise ValueError("event_time must include timezone information")
+
     def to_payload(self) -> dict:
         event_time = self.event_time.astimezone(timezone.utc)
         return {
