@@ -1,5 +1,6 @@
 import sys
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -7,11 +8,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from drone_inspection.dji_gateway import (
     DeviceCommand,
+    DispatchMissionCommand,
     DjiGateway,
+    DjiDock3Simulator,
     FlightEvent,
     GatewayMode,
     GatewayReceipt,
 )
+from drone_inspection.errors import DomainError
 
 
 class GatewayContractTests(unittest.TestCase):
@@ -73,6 +77,68 @@ class GatewayContractTests(unittest.TestCase):
             },
         )
         self.assertIn("mode", DjiGateway.__annotations__)
+
+
+class GatewayReceiptTests(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 6, 19, 5, 0, tzinfo=timezone.utc)
+        self.gateway = DjiDock3Simulator(clock=lambda: self.now)
+        self.command = DeviceCommand(
+            tenant_id="t_customer_001",
+            request_id="req_bind_001",
+            idempotency_key="bind-key-001",
+            device_sn="dock-sn-001",
+        )
+
+    def test_simulator_satisfies_protocol_and_marks_receipt_mode(self):
+        self.assertIsInstance(self.gateway, DjiGateway)
+        receipt = self.gateway.bind_device(self.command)
+        self.assertTrue(receipt.accepted)
+        self.assertEqual(receipt.mode, GatewayMode.SIMULATOR)
+        self.assertEqual(receipt.raw_payload["status"], "BOUND")
+
+    def test_same_idempotent_request_replays_original_receipt(self):
+        first = self.gateway.bind_device(self.command)
+        replay = self.gateway.bind_device(self.command)
+        self.assertEqual(replay, first)
+
+    def test_idempotency_fingerprint_conflict_returns_idemp_409(self):
+        self.gateway.bind_device(self.command)
+        conflict = replace(self.command, device_sn="dock-sn-002")
+        with self.assertRaises(DomainError) as raised:
+            self.gateway.bind_device(conflict)
+        self.assertEqual(raised.exception.code, "IDEMP_409")
+
+    def test_new_key_for_bound_device_uses_required_failure(self):
+        self.gateway.bind_device(self.command)
+        duplicate = replace(
+            self.command,
+            request_id="req_bind_002",
+            idempotency_key="bind-key-002",
+        )
+        with self.assertRaises(DomainError) as raised:
+            self.gateway.bind_device(duplicate)
+        self.assertEqual(raised.exception.code, "DJI_502")
+        self.assertEqual(
+            raised.exception.details["scenario"],
+            "device_already_bound",
+        )
+
+    def test_dispatch_receipt_is_accepted_but_explicitly_simulated(self):
+        command = DispatchMissionCommand(
+            tenant_id="t_customer_001",
+            request_id="req_dispatch_001",
+            idempotency_key="dispatch-key-001",
+            device_sn="dock-sn-001",
+            mission_id="ms_001",
+            route_version_id="route-v1",
+        )
+        receipt = self.gateway.dispatch_mission(command)
+        self.assertTrue(receipt.accepted)
+        self.assertEqual(
+            receipt.raw_payload["execution_proof"],
+            "SIMULATED_ONLY",
+        )
 
 
 if __name__ == "__main__":
