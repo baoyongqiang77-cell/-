@@ -11,9 +11,12 @@ from drone_inspection.dji_gateway import (
     DispatchMissionCommand,
     DjiGateway,
     DjiDock3Simulator,
+    ExceptionCommand,
     FlightEvent,
     GatewayMode,
     GatewayReceipt,
+    MediaSyncCommand,
+    TelemetryCommand,
 )
 from drone_inspection.errors import DomainError
 
@@ -139,6 +142,144 @@ class GatewayReceiptTests(unittest.TestCase):
             receipt.raw_payload["execution_proof"],
             "SIMULATED_ONLY",
         )
+
+
+class GatewayEventTests(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 6, 19, 5, 0, tzinfo=timezone.utc)
+        self.gateway = DjiDock3Simulator(clock=lambda: self.now)
+
+    def test_four_baseline_events_use_fixed_outer_contract(self):
+        bound = self.gateway.bind_device(
+            DeviceCommand(
+                "t_customer_001",
+                "req_bind",
+                "key_bind",
+                "dock-sn-001",
+            )
+        )
+        status = self.gateway.sync_device_status(
+            DeviceCommand(
+                "t_customer_001",
+                "req_status",
+                "key_status",
+                "dock-sn-001",
+            )
+        )
+        telemetry = self.gateway.publish_telemetry(
+            TelemetryCommand(
+                "t_customer_001",
+                "req_tel",
+                "key_tel",
+                "dock-sn-001",
+                76,
+                -62,
+            )
+        )
+        low_battery = self.gateway.publish_exception(
+            ExceptionCommand(
+                "t_customer_001",
+                "req_low",
+                "key_low",
+                "dock-sn-001",
+                "low_battery",
+                {"battery": 18},
+            )
+        )
+        media = self.gateway.complete_media_sync(
+            MediaSyncCommand(
+                "t_customer_001",
+                "req_media",
+                "key_media",
+                "dock-sn-001",
+                "ms_001",
+                "med_001",
+                "t_customer_001/proj_001/ms_001/media/med_001.mp4",
+                "sha256:abc",
+            )
+        )
+
+        self.assertTrue(bound.accepted)
+        self.assertEqual(status.event_code, "device_status")
+        for event in (status, telemetry, low_battery, media):
+            self.assertEqual(
+                set(event.to_payload()),
+                {
+                    "event_code",
+                    "event_time",
+                    "device_sn",
+                    "raw_payload",
+                },
+            )
+
+    def test_invalid_telemetry_maps_to_format_error(self):
+        command = TelemetryCommand(
+            "t_customer_001",
+            "req_tel",
+            "key_tel",
+            "dock-sn-001",
+            101,
+            -62,
+        )
+        with self.assertRaises(DomainError) as raised:
+            self.gateway.publish_telemetry(command)
+        self.assertEqual(raised.exception.code, "DJI_502")
+        self.assertEqual(
+            raised.exception.details["scenario"],
+            "format_error",
+        )
+
+    def test_invalid_checksum_maps_to_media_499(self):
+        command = MediaSyncCommand(
+            "t_customer_001",
+            "req_media",
+            "key_media",
+            "dock-sn-001",
+            "ms_001",
+            "med_001",
+            "tenant/path/media.mp4",
+            "md5:abc",
+        )
+        with self.assertRaises(DomainError) as raised:
+            self.gateway.complete_media_sync(command)
+        self.assertEqual(raised.exception.code, "MEDIA_499")
+        self.assertEqual(
+            raised.exception.details["scenario"],
+            "checksum_error",
+        )
+
+    def test_all_required_failure_scenarios_have_fixed_mapping(self):
+        expected = {
+            "credential_error": ("DJI_502", False),
+            "device_already_bound": ("DJI_502", False),
+            "format_error": ("DJI_502", False),
+            "timeout": ("DJI_502", True),
+            "device_no_response": ("DJI_502", True),
+            "checksum_error": ("MEDIA_499", True),
+        }
+        for scenario, (code, retryable) in expected.items():
+            with self.subTest(scenario=scenario):
+                gateway = DjiDock3Simulator(clock=lambda: self.now)
+                gateway.fail_next("bind_device", scenario)
+                with self.assertRaises(DomainError) as raised:
+                    gateway.bind_device(
+                        DeviceCommand(
+                            "t_customer_001",
+                            "req",
+                            f"key-{scenario}",
+                            "dock-sn-001",
+                        )
+                    )
+                self.assertEqual(raised.exception.code, code)
+                self.assertEqual(
+                    raised.exception.details["scenario"],
+                    scenario,
+                )
+                self.assertEqual(
+                    raised.exception.details["retryable"],
+                    retryable,
+                )
+                self.assertNotIn("credential", raised.exception.details)
 
 
 if __name__ == "__main__":

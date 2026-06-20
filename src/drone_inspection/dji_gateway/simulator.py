@@ -22,6 +22,14 @@ from .contracts import (
 
 class DjiDock3Simulator:
     mode = GatewayMode.SIMULATOR
+    FAILURE_SPECS = {
+        "credential_error": ("DJI_502", "DJI 凭证错误", False),
+        "device_already_bound": ("DJI_502", "设备已绑定", False),
+        "format_error": ("DJI_502", "DJI 回调格式错误", False),
+        "timeout": ("DJI_502", "DJI 调用超时", True),
+        "device_no_response": ("DJI_502", "设备无响应", True),
+        "checksum_error": ("MEDIA_499", "媒体 checksum 错误", True),
+    }
 
     def __init__(self, clock: Callable[[], datetime] | None = None):
         self._clock = clock or (lambda: datetime.now(timezone.utc))
@@ -30,6 +38,25 @@ class DjiDock3Simulator:
             tuple[str, str, str],
             tuple[str, object],
         ] = {}
+        self._failures: dict[str, str] = {}
+
+    def fail_next(self, operation: str, scenario: str) -> None:
+        if scenario not in self.FAILURE_SPECS:
+            raise ValueError(f"unknown failure scenario: {scenario}")
+        self._failures[operation] = scenario
+
+    def _raise_failure(self, scenario: str) -> None:
+        code, message, retryable = self.FAILURE_SPECS[scenario]
+        raise DomainError(
+            code,
+            message,
+            {"scenario": scenario, "retryable": retryable},
+        )
+
+    def _consume_failure(self, operation: str) -> None:
+        scenario = self._failures.pop(operation, None)
+        if scenario:
+            self._raise_failure(scenario)
 
     def _fingerprint(self, command) -> str:
         value = json.dumps(
@@ -76,17 +103,24 @@ class DjiDock3Simulator:
             mode=self.mode,
         )
 
+    def _event(
+        self,
+        event_code: str,
+        command,
+        raw_payload: dict,
+    ) -> FlightEvent:
+        return FlightEvent(
+            event_code=event_code,
+            event_time=self._clock(),
+            device_sn=command.device_sn,
+            raw_payload=raw_payload,
+        )
+
     def bind_device(self, command: DeviceCommand) -> GatewayReceipt:
         def operation():
+            self._consume_failure("bind_device")
             if command.device_sn in self._bound_devices:
-                raise DomainError(
-                    "DJI_502",
-                    "设备已绑定",
-                    {
-                        "scenario": "device_already_bound",
-                        "retryable": False,
-                    },
-                )
+                self._raise_failure("device_already_bound")
             self._bound_devices.add(command.device_sn)
             return self._receipt(
                 "bind_device",
@@ -103,10 +137,9 @@ class DjiDock3Simulator:
         self,
         command: DispatchMissionCommand,
     ) -> GatewayReceipt:
-        return self._idempotent(
-            "dispatch_mission",
-            command,
-            lambda: self._receipt(
+        def operation():
+            self._consume_failure("dispatch_mission")
+            return self._receipt(
                 "dispatch_mission",
                 command,
                 {
@@ -114,17 +147,63 @@ class DjiDock3Simulator:
                     "route_version_id": command.route_version_id,
                     "execution_proof": "SIMULATED_ONLY",
                 },
-            ),
+            )
+
+        return self._idempotent(
+            "dispatch_mission",
+            command,
+            operation,
         )
 
     def sync_device_status(self, command: DeviceCommand) -> FlightEvent:
-        raise NotImplementedError
+        def operation():
+            self._consume_failure("sync_device_status")
+            return self._event(
+                "device_status",
+                command,
+                {"status": "ONLINE", "mode": self.mode.value},
+            )
+
+        return self._idempotent("sync_device_status", command, operation)
 
     def publish_telemetry(self, command: TelemetryCommand) -> FlightEvent:
-        raise NotImplementedError
+        def operation():
+            self._consume_failure("publish_telemetry")
+            if not 0 <= command.battery <= 100:
+                self._raise_failure("format_error")
+            return self._event(
+                "telemetry",
+                command,
+                {"battery": command.battery, "signal": command.signal},
+            )
+
+        return self._idempotent("publish_telemetry", command, operation)
 
     def publish_exception(self, command: ExceptionCommand) -> FlightEvent:
-        raise NotImplementedError
+        def operation():
+            self._consume_failure("publish_exception")
+            if not command.event_code.strip():
+                self._raise_failure("format_error")
+            return self._event(command.event_code, command, command.values)
+
+        return self._idempotent("publish_exception", command, operation)
 
     def complete_media_sync(self, command: MediaSyncCommand) -> FlightEvent:
-        raise NotImplementedError
+        def operation():
+            self._consume_failure("complete_media_sync")
+            if not command.checksum.startswith("sha256:"):
+                self._raise_failure("checksum_error")
+            return self._event(
+                "media_upload_completed",
+                command,
+                {
+                    "mission_id": command.mission_id,
+                    "media_id": command.media_id,
+                    "storage_uri": command.storage_uri,
+                    "checksum": command.checksum,
+                    "chunk_total": 1,
+                    "chunk_completed": 1,
+                },
+            )
+
+        return self._idempotent("complete_media_sync", command, operation)
