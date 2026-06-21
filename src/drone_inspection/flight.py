@@ -1,86 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
 from .constants import MISSION_STATUSES
+from .dji_gateway import DjiDock3Simulator
 from .errors import DomainError
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-@dataclass(frozen=True)
-class CallbackEvent:
-    payload: dict
-
-
-class DjiDock3Simulator:
-    def __init__(self):
-        self.bound_devices: set[str] = set()
-
-    def _event(self, event_code: str, device_sn: str, raw_payload: dict) -> CallbackEvent:
-        return CallbackEvent(
-            {
-                "event_code": event_code,
-                "event_time": _now(),
-                "device_sn": device_sn,
-                "raw_payload": raw_payload,
-            }
-        )
-
-    def bind_device(self, tenant_id: str, device_sn: str) -> CallbackEvent:
-        if device_sn in self.bound_devices:
-            raise DomainError("DJI_502", "设备已绑定", {"device_sn": device_sn})
-        self.bound_devices.add(device_sn)
-        return self._event(
-            "device_bound",
-            device_sn,
-            {"tenant_id": tenant_id, "status": "BOUND"},
-        )
-
-    def telemetry(self, device_sn: str, battery: int, signal: int) -> CallbackEvent:
-        return self._event(
-            "telemetry",
-            device_sn,
-            {"battery": battery, "signal": signal},
-        )
-
-    def low_battery(self, device_sn: str, battery: int) -> CallbackEvent:
-        return self._event("low_battery", device_sn, {"battery": battery})
-
-    def media_upload_completed(
-        self,
-        device_sn: str,
-        mission_id: str,
-        media_id: str,
-        storage_uri: str,
-        checksum: str,
-    ) -> CallbackEvent:
-        return self._event(
-            "media_upload_completed",
-            device_sn,
-            {
-                "mission_id": mission_id,
-                "media_id": media_id,
-                "storage_uri": storage_uri,
-                "checksum": checksum,
-                "chunk_total": 1,
-                "chunk_completed": 1,
-            },
-        )
-
-    def failure_scenarios(self) -> dict[str, DomainError]:
-        return {
-            "credential_error": DomainError("DJI_502", "DJI 凭证错误"),
-            "device_already_bound": DomainError("DJI_502", "设备已绑定"),
-            "format_error": DomainError("DJI_502", "DJI 回调格式错误"),
-            "timeout": DomainError("DJI_502", "DJI 调用超时"),
-            "device_no_response": DomainError("DJI_502", "设备无响应"),
-            "checksum_error": DomainError("MEDIA_499", "媒体 checksum 错误"),
-        }
-
 
 class MissionStateMachine:
     ALLOWED = {
@@ -141,3 +65,5 @@ class NetworkPolicy:
     def can_access_internet(self, service_name: str) -> bool:
         return service_name in self.dji_gateway_services
 
+
+__all__ = ["DjiDock3Simulator", "MissionStateMachine", "NetworkPolicy"]

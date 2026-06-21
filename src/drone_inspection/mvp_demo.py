@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from .flight import DjiDock3Simulator, MissionStateMachine
+from .dji_gateway import DeviceCommand, DjiDock3Simulator
+from .flight import MissionStateMachine
 from .media_analysis import MediaAnalysisPipeline
 
 
@@ -79,7 +80,22 @@ def _run_m1_workflow() -> list[dict[str, str]]:
     mission.apply_device_ack(accepted=True, actor="dji_gateway")
 
     simulator = DjiDock3Simulator()
-    callback = simulator.bind_device("t_customer_001", "dock-demo-001")
+    simulator.bind_device(
+        DeviceCommand(
+            tenant_id="t_customer_001",
+            request_id="req_demo_bind",
+            idempotency_key="demo-bind-001",
+            device_sn="dock-demo-001",
+        )
+    )
+    callback = simulator.sync_device_status(
+        DeviceCommand(
+            tenant_id="t_customer_001",
+            request_id="req_demo_status",
+            idempotency_key="demo-status-001",
+            device_sn="dock-demo-001",
+        )
+    )
 
     pipeline = MediaAnalysisPipeline()
     media = pipeline.ingest_media(
@@ -108,8 +124,8 @@ def _run_m1_workflow() -> list[dict[str, str]]:
         {"name": "创建飞行任务", "status": mission.status, "evidence": "ms_demo_001"},
         {
             "name": "DJI 模拟回调",
-            "status": callback.payload["event_code"],
-            "evidence": callback.payload["device_sn"],
+            "status": callback.event_code,
+            "evidence": callback.device_sn,
         },
         {"name": "媒体入库", "status": media.status, "evidence": media.id},
         {"name": "抽帧", "status": frames[0].status, "evidence": frames[0].id},
