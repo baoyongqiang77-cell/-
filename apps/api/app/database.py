@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from fastapi import Request
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -27,6 +27,14 @@ def build_session_factory(url: str) -> sessionmaker[Session]:
         connect_args={"check_same_thread": False} if is_sqlite else {},
         pool_pre_ping=True,
     )
+    if is_sqlite:
+
+        @event.listens_for(engine, "connect")
+        def enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
     return sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
 
 

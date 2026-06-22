@@ -50,6 +50,8 @@ EXPECTED_TABLES = {
     "tenant_data_grants",
     "audit_logs",
     "idempotency_records",
+    "devices",
+    "docks",
 }
 
 
