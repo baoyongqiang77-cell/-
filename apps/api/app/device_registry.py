@@ -239,6 +239,15 @@ class DeviceRegistryService:
         )
 
         def operation() -> dict:
+            existing = self.session.scalar(
+                select(DockModel.id).where(DockModel.device_id == dock_device.id)
+            )
+            if existing is not None:
+                raise DomainError(
+                    "MISSION_422",
+                    "Dock registry already exists for this device",
+                    {"field": "device_id"},
+                )
             item = DockModel(
                 id=f"dock_{uuid4().hex[:12]}",
                 tenant_id=tenant_id,

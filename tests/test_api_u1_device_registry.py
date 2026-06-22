@@ -189,6 +189,173 @@ class DeviceRegistryReadApiTests(unittest.TestCase):
         self.assertIn("/api/v1/devices/{device_id}", paths)
         self.assertIn("/api/v1/docks", paths)
         self.assertIn("/api/v1/docks/{dock_id}", paths)
+        self.assertIn("/api/v1/admin/devices", paths)
+        self.assertIn("/api/v1/admin/devices/{device_id}", paths)
+        self.assertIn("/api/v1/admin/docks", paths)
+        self.assertIn("/api/v1/admin/docks/{dock_id}", paths)
+
+    def test_platform_admin_creates_device_once_for_target_tenant(self):
+        payload = self._device_create_payload("DRONE-A-001", "DRONE")
+        headers = self._platform_headers("create-drone-a")
+
+        first = self.client.post("/api/v1/admin/devices", json=payload, headers=headers)
+        replay = self.client.post("/api/v1/admin/devices", json=payload, headers=headers)
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(replay.json(), first.json())
+        self.assertEqual(first.json()["tenant_id"], "t_customer_001")
+        self.assertIsNone(first.json()["status"])
+
+    def test_customer_cannot_write_registry_and_denial_is_audited(self):
+        response = self.client.post(
+            "/api/v1/admin/devices",
+            json=self._device_create_payload("DRONE-A-002", "DRONE"),
+            headers={
+                "Authorization": "Bearer demo-customer-a",
+                "Idempotency-Key": "customer-write-denied",
+                "X-Request-Id": "req_customer_write_denied",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["code"], "PERM_403")
+        with self.session_factory() as session:
+            audit = session.scalar(
+                select(AuditLogModel).where(
+                    AuditLogModel.request_id == "req_customer_write_denied"
+                )
+            )
+        self.assertEqual(audit.action, "registry_write_denied")
+        self.assertEqual(audit.code, "PERM_403")
+
+    def test_registry_write_requires_idempotency_key(self):
+        response = self.client.post(
+            "/api/v1/admin/devices",
+            json=self._device_create_payload("DRONE-A-003", "DRONE"),
+            headers={
+                "Authorization": "Bearer demo-platform",
+                "X-Tenant-Id": "t_customer_001",
+            },
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "IDEMP_409")
+
+    def test_registry_write_rejects_conflicting_idempotency_payload(self):
+        headers = self._platform_headers("device-conflict")
+        first = self.client.post(
+            "/api/v1/admin/devices",
+            json=self._device_create_payload("DRONE-A-004", "DRONE"),
+            headers=headers,
+        )
+        conflict = self.client.post(
+            "/api/v1/admin/devices",
+            json=self._device_create_payload("DRONE-A-005", "DRONE"),
+            headers=headers,
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.json()["code"], "IDEMP_409")
+
+    def test_device_write_rejects_server_managed_fields(self):
+        payload = self._device_create_payload("DRONE-A-006", "DRONE")
+        payload.update({"tenant_id": "t_customer_002", "status": "ONLINE"})
+
+        response = self.client.post(
+            "/api/v1/admin/devices",
+            json=payload,
+            headers=self._platform_headers("forbidden-device-fields"),
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["code"], "MISSION_422")
+
+    def test_duplicate_serial_returns_unified_mission_error(self):
+        response = self.client.post(
+            "/api/v1/admin/devices",
+            json=self._device_create_payload("DOCK-A-001", "DOCK"),
+            headers=self._platform_headers("duplicate-device-serial"),
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["code"], "MISSION_422")
+
+    def test_platform_admin_updates_device_and_dock(self):
+        device = self.client.patch(
+            "/api/v1/admin/devices/dev_a",
+            json={"name": "Updated Dock", "firmware_version": "2.0.0"},
+            headers=self._platform_headers("update-device-a"),
+        )
+        dock = self.client.patch(
+            "/api/v1/admin/docks/dock_a",
+            json={"environment_json": {"site": "north"}},
+            headers=self._platform_headers("update-dock-a"),
+        )
+
+        self.assertEqual(device.status_code, 200)
+        self.assertEqual(device.json()["firmware_version"], "2.0.0")
+        self.assertEqual(dock.status_code, 200)
+        self.assertEqual(dock.json()["environment_json"], {"site": "north"})
+
+    def test_dock_write_rejects_cross_tenant_binding(self):
+        response = self.client.post(
+            "/api/v1/admin/docks",
+            json={"device_id": "dev_a", "bound_drone_device_id": "dev_b"},
+            headers=self._platform_headers("cross-tenant-dock-binding"),
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "TENANT_404")
+
+    def test_dock_write_rejects_duplicate_dock_device(self):
+        response = self.client.post(
+            "/api/v1/admin/docks",
+            json={"device_id": "dev_a"},
+            headers=self._platform_headers("duplicate-dock-device"),
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["code"], "MISSION_422")
+
+    def test_platform_admin_creates_dock_for_new_dock_device(self):
+        device_response = self.client.post(
+            "/api/v1/admin/devices",
+            json=self._device_create_payload("DOCK-A-NEW", "DOCK"),
+            headers=self._platform_headers("create-new-dock-device"),
+        )
+        self.assertEqual(device_response.status_code, 200)
+
+        response = self.client.post(
+            "/api/v1/admin/docks",
+            json={
+                "device_id": device_response.json()["id"],
+                "environment_json": {"site": "south"},
+            },
+            headers=self._platform_headers("create-new-dock"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["tenant_id"], "t_customer_001")
+        self.assertEqual(response.json()["environment_json"], {"site": "south"})
+
+    def _platform_headers(self, idempotency_key: str) -> dict[str, str]:
+        return {
+            "Authorization": "Bearer demo-platform",
+            "X-Tenant-Id": "t_customer_001",
+            "Idempotency-Key": idempotency_key,
+        }
+
+    @staticmethod
+    def _device_create_payload(serial_number: str, device_type: str) -> dict:
+        return {
+            "device_type": device_type,
+            "name": serial_number,
+            "manufacturer": "DJI",
+            "model": "DJI Dock 3" if device_type == "DOCK" else None,
+            "serial_number": serial_number,
+            "firmware_version": "1.0.0",
+        }
 
 
 if __name__ == "__main__":
