@@ -15,7 +15,9 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from app.bootstrap import bootstrap_u0
 from app.database import build_session_factory
+from app.device_registry import DeviceRegistryRepository
 from app.models import Base, DeviceModel, DockModel
+from drone_inspection.errors import DomainError
 
 
 class DeviceRegistryModelTests(unittest.TestCase):
@@ -121,6 +123,81 @@ class DeviceRegistryModelTests(unittest.TestCase):
             )
         finally:
             engine.dispose()
+
+
+class DeviceRegistryRepositoryTests(unittest.TestCase):
+    def setUp(self):
+        self.factory = build_session_factory("sqlite+pysqlite:///:memory:")
+        Base.metadata.create_all(self.factory.kw["bind"])
+        self.session = self.factory()
+        bootstrap_u0(self.session)
+        self.session.add_all(
+            [
+                DeviceModel(
+                    id="dev_customer_a",
+                    tenant_id="t_customer_001",
+                    device_type="DOCK",
+                    name="客户A机场",
+                    manufacturer="DJI",
+                    model="DJI Dock 3",
+                    serial_number="DOCK-A-001",
+                ),
+                DeviceModel(
+                    id="dev_customer_b",
+                    tenant_id="t_customer_002",
+                    device_type="DOCK",
+                    name="客户B机场",
+                    manufacturer="DJI",
+                    model="DJI Dock 3",
+                    serial_number="DOCK-B-001",
+                ),
+            ]
+        )
+        self.session.flush()
+        self.session.add_all(
+            [
+                DockModel(
+                    id="dock_customer_a",
+                    tenant_id="t_customer_001",
+                    device_id="dev_customer_a",
+                ),
+                DockModel(
+                    id="dock_customer_b",
+                    tenant_id="t_customer_002",
+                    device_id="dev_customer_b",
+                ),
+            ]
+        )
+        self.session.commit()
+        self.repository = DeviceRegistryRepository(self.session)
+
+    def tearDown(self):
+        self.session.close()
+        self.factory.kw["bind"].dispose()
+
+    def test_list_devices_is_always_tenant_filtered(self):
+        items = self.repository.list_devices("t_customer_001")
+
+        self.assertEqual([item.id for item in items], ["dev_customer_a"])
+
+    def test_cross_tenant_device_detail_returns_tenant_404(self):
+        with self.assertRaises(DomainError) as raised:
+            self.repository.device("t_customer_001", "dev_customer_b")
+
+        self.assertEqual(raised.exception.code, "TENANT_404")
+
+    def test_serial_lookup_is_reserved_for_internal_status_sync(self):
+        item = self.repository.device_by_serial("DOCK-A-001")
+
+        self.assertEqual(item.tenant_id, "t_customer_001")
+
+    def test_list_and_detail_docks_are_tenant_filtered(self):
+        items = self.repository.list_docks("t_customer_002")
+
+        self.assertEqual([item.id for item in items], ["dock_customer_b"])
+        with self.assertRaises(DomainError) as raised:
+            self.repository.dock("t_customer_002", "dock_customer_a")
+        self.assertEqual(raised.exception.code, "TENANT_404")
 
 
 if __name__ == "__main__":
