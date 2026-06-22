@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import CheckConstraint, create_engine, inspect
+from sqlalchemy import CheckConstraint, create_engine, func, inspect, select
 from sqlalchemy.exc import IntegrityError
 
 
@@ -15,8 +15,9 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from app.bootstrap import bootstrap_u0
 from app.database import build_session_factory
-from app.device_registry import DeviceRegistryRepository
-from app.models import Base, DeviceModel, DockModel
+from app.device_registry import DeviceRegistryRepository, DeviceRegistryService
+from app.models import AuditLogModel, Base, DeviceModel, DockModel
+from app.repositories import RequestMeta
 from drone_inspection.errors import DomainError
 
 
@@ -199,6 +200,217 @@ class DeviceRegistryRepositoryTests(unittest.TestCase):
             self.repository.dock("t_customer_002", "dock_customer_a")
         self.assertEqual(raised.exception.code, "TENANT_404")
 
+
+class DeviceRegistryServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.factory = build_session_factory("sqlite+pysqlite:///:memory:")
+        Base.metadata.create_all(self.factory.kw["bind"])
+        self.session = self.factory()
+        bootstrap_u0(self.session)
+        self.service = DeviceRegistryService(self.session)
+
+    def tearDown(self):
+        self.session.close()
+        self.factory.kw["bind"].dispose()
+
+    def test_creates_device_once_with_idempotent_replay(self):
+        values = self._device_values("DOCK", "DOCK-A-001", "机场一号")
+
+        first = self.service.create_device(
+            actor_id="u_platform_admin",
+            tenant_id="t_customer_001",
+            values=values,
+            idempotency_key="device-create-001",
+            request_meta=RequestMeta("req_device_001", "127.0.0.1"),
+        )
+        replay = self.service.create_device(
+            actor_id="u_platform_admin",
+            tenant_id="t_customer_001",
+            values=values,
+            idempotency_key="device-create-001",
+            request_meta=RequestMeta("req_device_001", "127.0.0.1"),
+        )
+
+        self.assertEqual(replay, first)
+        self.assertEqual(
+            self.session.scalar(select(func.count(DeviceModel.id))),
+            1,
+        )
+        self.assertEqual(
+            self.session.scalar(
+                select(func.count(AuditLogModel.id)).where(
+                    AuditLogModel.action == "device_created"
+                )
+            ),
+            1,
+        )
+
+    def test_same_key_is_independent_between_target_tenants(self):
+        first = self._create_device(
+            "t_customer_001",
+            "DOCK-A-001",
+            "shared-key",
+        )
+        second = self._create_device(
+            "t_customer_002",
+            "DOCK-B-001",
+            "shared-key",
+        )
+
+        self.assertNotEqual(first["tenant_id"], second["tenant_id"])
+
+    def test_duplicate_serial_returns_mission_422(self):
+        self._create_device("t_customer_001", "DOCK-A-001", "first-key")
+
+        with self.assertRaises(DomainError) as raised:
+            self._create_device("t_customer_002", "DOCK-A-001", "duplicate-key")
+
+        self.assertEqual(raised.exception.code, "MISSION_422")
+
+    def test_device_update_changes_only_allowed_fields(self):
+        created = self._create_device(
+            "t_customer_001",
+            "DOCK-A-001",
+            "device-create",
+        )
+
+        result = self.service.update_device(
+            actor_id="u_platform_admin",
+            tenant_id="t_customer_001",
+            device_id=created["id"],
+            values={"name": "机场一号更新", "firmware_version": "1.1.0"},
+            idempotency_key="device-update-001",
+            request_meta=RequestMeta("req_device_update", None),
+        )
+
+        self.assertEqual(result["name"], "机场一号更新")
+        self.assertEqual(result["firmware_version"], "1.1.0")
+        self.assertIsNone(result["status"])
+
+    def test_dock_rejects_wrong_device_type(self):
+        drone = self._create_device(
+            "t_customer_001",
+            "DRONE-A-001",
+            "drone-create",
+            device_type="DRONE",
+        )
+
+        with self.assertRaises(DomainError) as raised:
+            self.service.create_dock(
+                actor_id="u_platform_admin",
+                tenant_id="t_customer_001",
+                values={"device_id": drone["id"]},
+                idempotency_key="dock-create-wrong-type",
+                request_meta=RequestMeta("req_dock_wrong", None),
+            )
+
+        self.assertEqual(raised.exception.code, "MISSION_422")
+
+    def test_dock_create_and_update_validate_tenant_and_types(self):
+        dock_device = self._create_device(
+            "t_customer_001", "DOCK-A-001", "dock-device-create"
+        )
+        drone = self._create_device(
+            "t_customer_001",
+            "DRONE-A-001",
+            "drone-create",
+            device_type="DRONE",
+        )
+        edge = self._create_device(
+            "t_customer_001",
+            "EDGE-A-001",
+            "edge-create",
+            device_type="EDGE_NODE",
+        )
+        created = self.service.create_dock(
+            actor_id="u_platform_admin",
+            tenant_id="t_customer_001",
+            values={"device_id": dock_device["id"]},
+            idempotency_key="dock-create",
+            request_meta=RequestMeta("req_dock_create", None),
+        )
+
+        updated = self.service.update_dock(
+            actor_id="u_platform_admin",
+            tenant_id="t_customer_001",
+            dock_id=created["id"],
+            values={
+                "bound_drone_device_id": drone["id"],
+                "edge_node_device_id": edge["id"],
+            },
+            idempotency_key="dock-update",
+            request_meta=RequestMeta("req_dock_update", None),
+        )
+
+        self.assertEqual(updated["bound_drone_device_id"], drone["id"])
+        self.assertEqual(updated["edge_node_device_id"], edge["id"])
+        audit = self.session.scalar(
+            select(AuditLogModel).where(
+                AuditLogModel.action == "dock_updated"
+            )
+        )
+        self.assertEqual(audit.tenant_id, "t_customer_001")
+        self.assertEqual(audit.request_id, "req_dock_update")
+
+    def test_cross_tenant_dock_association_returns_tenant_404(self):
+        dock_device = self._create_device(
+            "t_customer_001", "DOCK-A-001", "dock-device-create"
+        )
+        other_drone = self._create_device(
+            "t_customer_002",
+            "DRONE-B-001",
+            "other-drone-create",
+            device_type="DRONE",
+        )
+
+        with self.assertRaises(DomainError) as raised:
+            self.service.create_dock(
+                actor_id="u_platform_admin",
+                tenant_id="t_customer_001",
+                values={
+                    "device_id": dock_device["id"],
+                    "bound_drone_device_id": other_drone["id"],
+                },
+                idempotency_key="dock-cross-tenant",
+                request_meta=RequestMeta("req_dock_cross", None),
+            )
+
+        self.assertEqual(raised.exception.code, "TENANT_404")
+
+    def _create_device(
+        self,
+        tenant_id: str,
+        serial_number: str,
+        key: str,
+        *,
+        device_type: str = "DOCK",
+    ) -> dict:
+        return self.service.create_device(
+            actor_id="u_platform_admin",
+            tenant_id=tenant_id,
+            values=self._device_values(
+                device_type,
+                serial_number,
+                serial_number,
+            ),
+            idempotency_key=key,
+            request_meta=RequestMeta(f"req_{key}", None),
+        )
+
+    @staticmethod
+    def _device_values(
+        device_type: str,
+        serial_number: str,
+        name: str,
+    ) -> dict:
+        return {
+            "device_type": device_type,
+            "name": name,
+            "manufacturer": "DJI",
+            "model": "DJI Dock 3" if device_type == "DOCK" else None,
+            "serial_number": serial_number,
+            "firmware_version": "1.0.0",
+        }
 
 if __name__ == "__main__":
     unittest.main()
