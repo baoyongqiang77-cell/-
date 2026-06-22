@@ -24,6 +24,7 @@ from .dependencies import (
     request_meta,
     resolve_tenant_context,
 )
+from .device_registry import DeviceRegistryRepository, device_payload, dock_payload
 from .repositories import RequestMeta, U0Repository
 
 
@@ -258,6 +259,81 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
             "items": [_audit_log_payload(log) for log in repo.audit_logs(tenant_id)]
         }
 
+    @app.get("/api/v1/devices", tags=["U1 device registry"])
+    def list_devices(
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        registry = DeviceRegistryRepository(repo.session)
+        return {
+            "items": [
+                device_payload(item)
+                for item in registry.list_devices(context.tenant_id)
+            ]
+        }
+
+    @app.get("/api/v1/devices/{device_id}", tags=["U1 device registry"])
+    def get_device(
+        device_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        registry = DeviceRegistryRepository(repo.session)
+        try:
+            return device_payload(registry.device(context.tenant_id, device_id))
+        except DomainError as exc:
+            _commit_registry_read_denial(
+                request, repo, actor, context, meta, exc, "device", device_id
+            )
+            raise
+
+    @app.get("/api/v1/docks", tags=["U1 device registry"])
+    def list_docks(
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        registry = DeviceRegistryRepository(repo.session)
+        return {
+            "items": [
+                dock_payload(item) for item in registry.list_docks(context.tenant_id)
+            ]
+        }
+
+    @app.get("/api/v1/docks/{dock_id}", tags=["U1 device registry"])
+    def get_dock(
+        dock_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        registry = DeviceRegistryRepository(repo.session)
+        try:
+            return dock_payload(registry.dock(context.tenant_id, dock_id))
+        except DomainError as exc:
+            _commit_registry_read_denial(
+                request, repo, actor, context, meta, exc, "dock", dock_id
+            )
+            raise
+
     return app
 
 
@@ -310,6 +386,62 @@ def _require_roles(
             code=exc.code,
         )
         raise
+
+
+def _require_feature(
+    request: Request,
+    repo: U0Repository,
+    actor: Actor,
+    context: TenantContext,
+    feature: FeatureCode,
+    meta: RequestMeta,
+) -> None:
+    if context.has_feature(feature):
+        return
+    error = DomainError(
+        "FEATURE_403",
+        "当前租户未开通目标功能",
+        {"feature_code": feature.value},
+    )
+    repo.session.rollback()
+    error.request_id = meta.request_id
+    U0Repository.commit_denial_audit(
+        request.app.state.session_factory,
+        tenant_id=context.tenant_id,
+        actor=actor.id,
+        action="feature_denied",
+        resource_type="feature",
+        resource_id=feature.value,
+        request_meta=meta,
+        code=error.code,
+    )
+    raise error
+
+
+def _commit_registry_read_denial(
+    request: Request,
+    repo: U0Repository,
+    actor: Actor,
+    context: TenantContext,
+    meta: RequestMeta,
+    error: DomainError,
+    resource_type: str,
+    resource_id: str,
+) -> None:
+    if error.code != "TENANT_404":
+        return
+    repo.session.rollback()
+    error.request_id = meta.request_id
+    U0Repository.commit_denial_audit(
+        request.app.state.session_factory,
+        tenant_id=context.tenant_id,
+        actor=actor.id,
+        action="registry_read_denied",
+        resource_type=resource_type,
+        resource_id=resource_id,
+        request_meta=meta,
+        code=error.code,
+    )
 
 
 def _tenant_payload(context: TenantContext) -> dict:
