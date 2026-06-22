@@ -7,6 +7,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from drone_inspection.dji_gateway import FlightEvent
 from drone_inspection.errors import DomainError
 
 from .models import DeviceModel, DockModel, utc_now
@@ -353,3 +354,67 @@ class DeviceRegistryService:
     def _fingerprint(payload: dict) -> str:
         encoded = dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         return sha256(encoded).hexdigest()
+
+
+class DeviceStatusService:
+    ENVIRONMENT_KEYS = {
+        "dock_door",
+        "charging",
+        "weather",
+        "payload_status",
+    }
+
+    def __init__(self, session: Session):
+        self.session = session
+        self.registry = DeviceRegistryRepository(session)
+        self.u0 = U0Repository(session)
+
+    def apply_event(self, event: FlightEvent, request_meta: RequestMeta) -> dict:
+        device = self.registry.device_by_serial(event.device_sn)
+        if event.event_code != "device_status":
+            return device_payload(device)
+
+        status = event.raw_payload.get("status")
+        if status not in {"ONLINE", "OFFLINE"}:
+            raise DomainError(
+                "DJI_502",
+                "DJI 设备状态格式错误",
+                {"field": "raw_payload.status"},
+            )
+
+        before_status = device.status
+        device.status = status
+        if status == "ONLINE":
+            device.last_seen_at = event.event_time
+        device.updated_at = utc_now()
+
+        dock = self.session.scalar(
+            select(DockModel).where(
+                DockModel.tenant_id == device.tenant_id,
+                DockModel.device_id == device.id,
+            )
+        )
+        if dock is not None:
+            environment = dict(dock.environment_json)
+            environment.update(
+                {
+                    key: event.raw_payload[key]
+                    for key in self.ENVIRONMENT_KEYS
+                    if key in event.raw_payload
+                }
+            )
+            dock.environment_json = environment
+            dock.updated_at = utc_now()
+
+        self.u0.audit(
+            tenant_id=device.tenant_id,
+            actor="dji_gateway",
+            action="device_status_synced",
+            resource_type="device",
+            resource_id=device.id,
+            request_meta=request_meta,
+            before_status=before_status,
+            after_status=status,
+        )
+        self.session.commit()
+        return device_payload(device)

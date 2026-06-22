@@ -1,5 +1,6 @@
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -15,9 +16,14 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from app.bootstrap import bootstrap_u0
 from app.database import build_session_factory
-from app.device_registry import DeviceRegistryRepository, DeviceRegistryService
+from app.device_registry import (
+    DeviceRegistryRepository,
+    DeviceRegistryService,
+    DeviceStatusService,
+)
 from app.models import AuditLogModel, Base, DeviceModel, DockModel
 from app.repositories import RequestMeta
+from drone_inspection.dji_gateway import FlightEvent
 from drone_inspection.errors import DomainError
 
 
@@ -411,6 +417,155 @@ class DeviceRegistryServiceTests(unittest.TestCase):
             "serial_number": serial_number,
             "firmware_version": "1.0.0",
         }
+
+
+class DeviceStatusServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.factory = build_session_factory("sqlite+pysqlite:///:memory:")
+        Base.metadata.create_all(self.factory.kw["bind"])
+        self.session = self.factory()
+        bootstrap_u0(self.session)
+        self.now = datetime(2026, 6, 21, 8, 0, tzinfo=timezone.utc)
+        self.session.add(
+            DeviceModel(
+                id="dev_status_dock",
+                tenant_id="t_customer_001",
+                device_type="DOCK",
+                name="Status Dock",
+                manufacturer="DJI",
+                model="DJI Dock 3",
+                serial_number="DOCK-A-STATUS-001",
+            )
+        )
+        self.session.flush()
+        self.session.add(
+            DockModel(
+                id="dock_status",
+                tenant_id="t_customer_001",
+                device_id="dev_status_dock",
+                environment_json={"existing": "kept"},
+            )
+        )
+        self.session.commit()
+        self.repository = DeviceRegistryRepository(self.session)
+        self.status_service = DeviceStatusService(self.session)
+
+    def tearDown(self):
+        self.session.close()
+        self.factory.kw["bind"].dispose()
+
+    def test_device_bound_does_not_claim_device_is_online(self):
+        result = self.status_service.apply_event(
+            FlightEvent(
+                event_code="device_bound",
+                event_time=self.now,
+                device_sn="DOCK-A-STATUS-001",
+                raw_payload={"status": "BOUND"},
+            ),
+            RequestMeta("req_bound_001", "127.0.0.1"),
+        )
+
+        self.assertIsNone(result["status"])
+        self.assertIsNone(self._latest_audit())
+
+    def test_device_status_online_updates_last_seen_and_audits_gateway_actor(self):
+        result = self._apply_online()
+
+        self.assertEqual(result["status"], "ONLINE")
+        self.assertEqual(result["last_seen_at"], self.now.isoformat())
+        audit = self._latest_audit()
+        self.assertEqual(audit.actor, "dji_gateway")
+        self.assertEqual(audit.request_id, "req_status_001")
+        self.assertEqual(audit.before_status, None)
+        self.assertEqual(audit.after_status, "ONLINE")
+
+    def test_offline_preserves_last_seen(self):
+        self._apply_online()
+        previous = self.repository.device_by_serial(
+            "DOCK-A-STATUS-001"
+        ).last_seen_at
+
+        result = self.status_service.apply_event(
+            FlightEvent(
+                event_code="device_status",
+                event_time=self.now + timedelta(seconds=5),
+                device_sn="DOCK-A-STATUS-001",
+                raw_payload={"status": "OFFLINE", "ignored": "raw"},
+            ),
+            RequestMeta("req_status_offline", None),
+        )
+
+        self.assertEqual(result["status"], "OFFLINE")
+        self.assertEqual(result["last_seen_at"], previous.isoformat())
+
+    def test_invalid_status_returns_dji_502(self):
+        with self.assertRaises(DomainError) as raised:
+            self.status_service.apply_event(
+                FlightEvent(
+                    event_code="device_status",
+                    event_time=self.now,
+                    device_sn="DOCK-A-STATUS-001",
+                    raw_payload={"status": "UNKNOWN"},
+                ),
+                RequestMeta("req_status_invalid", None),
+            )
+
+        self.assertEqual(raised.exception.code, "DJI_502")
+
+    def test_unknown_serial_returns_tenant_404(self):
+        with self.assertRaises(DomainError) as raised:
+            self.status_service.apply_event(
+                FlightEvent(
+                    event_code="device_status",
+                    event_time=self.now,
+                    device_sn="UNKNOWN-SERIAL",
+                    raw_payload={"status": "ONLINE"},
+                ),
+                RequestMeta("req_unknown_serial", None),
+            )
+
+        self.assertEqual(raised.exception.code, "TENANT_404")
+
+    def test_environment_snapshot_uses_allowlist(self):
+        self._apply_online()
+
+        dock = self.repository.dock("t_customer_001", "dock_status")
+        self.assertEqual(
+            dock.environment_json,
+            {
+                "existing": "kept",
+                "dock_door": "CLOSED",
+                "charging": True,
+                "weather": {"wind_speed_mps": 4.2},
+                "payload_status": "READY",
+            },
+        )
+        self.assertNotIn("credential", dock.environment_json)
+
+    def _apply_online(self) -> dict:
+        return self.status_service.apply_event(
+            FlightEvent(
+                event_code="device_status",
+                event_time=self.now,
+                device_sn="DOCK-A-STATUS-001",
+                raw_payload={
+                    "status": "ONLINE",
+                    "dock_door": "CLOSED",
+                    "charging": True,
+                    "weather": {"wind_speed_mps": 4.2},
+                    "payload_status": "READY",
+                    "credential": "must-not-persist",
+                },
+            ),
+            RequestMeta("req_status_001", "127.0.0.1"),
+        )
+
+    def _latest_audit(self):
+        return self.session.scalar(
+            select(AuditLogModel)
+            .where(AuditLogModel.action == "device_status_synced")
+            .order_by(AuditLogModel.id.desc())
+        )
 
 if __name__ == "__main__":
     unittest.main()
