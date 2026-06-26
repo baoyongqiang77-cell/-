@@ -47,7 +47,7 @@
 | 全项目自动化测试共 120 项 | PASS |
 | Python 源码编译与 `git diff --check` | PASS |
 | Linux PostgreSQL 迁移脚本静态语法校验 | PASS |
-| 云端 PostgreSQL `upgrade/downgrade/upgrade` 实测 | BLOCKED：待云控制台确认 SSH 主机指纹 |
+| 云端 PostgreSQL `upgrade/downgrade/upgrade` 实测 | PASS：2026-06-26 在 `8.163.127.126:/opt/drone-u1-f02-migration-test` 通过，测试端口 `55433` |
 
 ## 自动化命令
 
@@ -56,6 +56,7 @@
 & '.\.venv\Scripts\python.exe' -m unittest tests.test_api_u1_device_registry tests.test_u1_device_registry_persistence -v
 & '.\.venv\Scripts\python.exe' -m unittest discover -s tests -v
 & '.\.venv\Scripts\python.exe' -m compileall -q src apps/api/app
+# 云端：U0_POSTGRES_TEST_PORT=55433 ./scripts/test_postgres_migrations.sh
 ```
 
 ## 未纳入本增量
@@ -63,8 +64,8 @@
 - DJI Cloud API 版本、凭证、回调签名、配套无人机和载荷型号仍待确认。
 - 模拟器仅作为 M1 开发证据，不能满足真实飞行或生产验收。
 - 航线、任务、审批、遥测 WebSocket 和 `flight_events` 持久化属于后续 U1 增量。
-- 云端 PostgreSQL 迁移尚未执行；本机未保存 `8.163.127.126` 主机键，必须先由云控制台人工核对服务器提供的 SSH 指纹。
+- 云端 PostgreSQL 迁移实测已完成；远端通过本机确认的 ED25519 SSH 主机指纹后接入，Docker Hub 直连不可达时使用国内镜像源预拉取同一 `postgres:16-alpine` 镜像。
 
 ## 验收结论
 
-U1-F01 网关契约、开发模拟器和状态机规则级验收通过；U1-F02 设备与机巢台账的本地自动化验收通过，云端 PostgreSQL 迁移实测待 SSH 主机身份确认后补充。当前结果不代表真实 DJI 设备、DJI Cloud API、配套无人机/载荷型号、真实飞行或生产网络验收通过。
+U1-F01 网关契约、开发模拟器和状态机规则级验收通过；U1-F02 设备与机巢台账的本地自动化验收和云端 PostgreSQL 迁移 `upgrade/downgrade/upgrade` 实测均通过。当前结果不代表真实 DJI 设备、DJI Cloud API、配套无人机/载荷型号、真实飞行或生产网络验收通过。
