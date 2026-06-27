@@ -123,6 +123,23 @@ class MissionCreationApiTests(unittest.TestCase):
             "media_policy": {"video": True, "image_interval_sec": 2},
         }
 
+    def _record_telemetry_event(self, event_code: str, key: str) -> dict:
+        response = self.client.post(
+            "/api/v1/missions/ms_a/telemetry-events",
+            json={
+                "event_code": event_code,
+                "event_time": "2026-07-01T09:03:00+00:00",
+                "device_sn": "dock-a",
+                "raw_payload": {"battery": 18, "signal": -70},
+            },
+            headers={
+                "Authorization": "Bearer demo-customer-a",
+                "Idempotency-Key": key,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.json()
+
     def test_customer_creates_draft_mission_once_and_reads_it(self):
         headers = {
             "Authorization": "Bearer demo-customer-a",
@@ -565,6 +582,86 @@ class MissionCreationApiTests(unittest.TestCase):
         self.assertEqual(error["code"], "FEATURE_403")
         self.assertEqual(error["details"]["feature_code"], "FLIGHT_CONTROL")
 
+    def test_customer_links_and_lists_flight_exception_once(self):
+        event = self._record_telemetry_event("low_battery", "exception-seed-low")
+        headers = {
+            "Authorization": "Bearer demo-customer-a",
+            "Idempotency-Key": "exception-link-low",
+        }
+        first = self.client.post(
+            f"/api/v1/missions/ms_a/flight-events/{event['id']}/link-exception",
+            headers=headers,
+        )
+        replay = self.client.post(
+            f"/api/v1/missions/ms_a/flight-events/{event['id']}/link-exception",
+            headers=headers,
+        )
+        listed = self.client.get(
+            "/api/v1/missions/ms_a/flight-exceptions",
+            headers={"Authorization": "Bearer demo-customer-a"},
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(replay.json(), first.json())
+        self.assertEqual(first.json()["exception_code"], "LOW_BATTERY")
+        self.assertEqual(first.json()["severity"], "HIGH")
+        self.assertEqual(listed.json()["items"][0]["id"], first.json()["id"])
+
+    def test_flight_exception_link_requires_idempotency_key(self):
+        event = self._record_telemetry_event("low_battery", "exception-seed-no-key")
+        response = self.client.post(
+            f"/api/v1/missions/ms_a/flight-events/{event['id']}/link-exception",
+            headers={"Authorization": "Bearer demo-customer-a"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "IDEMP_409")
+
+    def test_flight_exception_unsupported_event_returns_mission_422(self):
+        event = self._record_telemetry_event("telemetry", "exception-seed-unsupported")
+        response = self.client.post(
+            f"/api/v1/missions/ms_a/flight-events/{event['id']}/link-exception",
+            headers={
+                "Authorization": "Bearer demo-customer-a",
+                "Idempotency-Key": "exception-unsupported",
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["code"], "MISSION_422")
+
+    def test_flight_exception_cross_tenant_does_not_reveal_mission(self):
+        event = self._record_telemetry_event("low_battery", "exception-seed-cross")
+        response = self.client.post(
+            f"/api/v1/missions/ms_a/flight-events/{event['id']}/link-exception",
+            headers={
+                "Authorization": "Bearer demo-customer-b",
+                "Idempotency-Key": "exception-cross",
+            },
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "TENANT_404")
+
+    def test_flight_exception_requires_flight_control_entitlement(self):
+        event = self._record_telemetry_event("low_battery", "exception-seed-feature")
+        with self.session_factory() as session:
+            session.execute(
+                delete(TenantFeatureEntitlementModel).where(
+                    TenantFeatureEntitlementModel.tenant_id == "t_customer_001",
+                    TenantFeatureEntitlementModel.feature_code == "FLIGHT_CONTROL",
+                )
+            )
+            session.commit()
+
+        response = self.client.get(
+            "/api/v1/missions/ms_a/flight-exceptions",
+            headers={"Authorization": "Bearer demo-customer-a"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["code"], "FEATURE_403")
+
     def test_forbidden_server_managed_fields_return_mission_422(self):
         payload = self._payload()
         payload["tenant_id"] = "t_customer_002"
@@ -596,6 +693,11 @@ class MissionCreationApiTests(unittest.TestCase):
         )
         self.assertIn("/api/v1/missions/{mission_id}/dispatch", paths)
         self.assertIn("/api/v1/missions/{mission_id}/telemetry-events", paths)
+        self.assertIn(
+            "/api/v1/missions/{mission_id}/flight-events/{flight_event_id}/link-exception",
+            paths,
+        )
+        self.assertIn("/api/v1/missions/{mission_id}/flight-exceptions", paths)
 
 
 if __name__ == "__main__":

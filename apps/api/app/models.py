@@ -658,3 +658,47 @@ class FlightEventModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
+
+
+class FlightExceptionLinkModel(Base):
+    __tablename__ = "flight_exception_links"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "mission_id"],
+            ["missions.tenant_id", "missions.id"],
+            name="fk_flight_exception_links_tenant_mission",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "flight_event_id",
+            name="uq_flight_exception_links_tenant_event",
+        ),
+        CheckConstraint(
+            "severity IN ('MEDIUM', 'HIGH', 'CRITICAL')",
+            name="ck_flight_exception_links_severity",
+        ),
+        CheckConstraint(
+            "status IN ('OPEN', 'ACKNOWLEDGED', 'CLOSED')",
+            name="ck_flight_exception_links_status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    mission_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    flight_event_id: Mapped[str] = mapped_column(
+        ForeignKey("flight_events.id"), nullable=False
+    )
+    device_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    exception_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="OPEN")
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )

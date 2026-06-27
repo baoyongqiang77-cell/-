@@ -37,6 +37,7 @@ class MissionModelTests(unittest.TestCase):
         self.assertIn("mission_approvals", Base.metadata.tables)
         self.assertIn("mission_dispatch_receipts", Base.metadata.tables)
         self.assertIn("flight_events", Base.metadata.tables)
+        self.assertIn("flight_exception_links", Base.metadata.tables)
 
     def test_mission_model_registers_required_constraints(self):
         models = importlib.import_module("app.models")
@@ -71,6 +72,17 @@ class MissionModelTests(unittest.TestCase):
 
         self.assertIn("fk_flight_events_tenant_mission", constraints)
 
+    def test_flight_exception_link_model_registers_required_constraints(self):
+        models = importlib.import_module("app.models")
+        constraints = {
+            item.name for item in models.FlightExceptionLinkModel.__table__.constraints
+        }
+
+        self.assertIn("fk_flight_exception_links_tenant_mission", constraints)
+        self.assertIn("uq_flight_exception_links_tenant_event", constraints)
+        self.assertIn("ck_flight_exception_links_severity", constraints)
+        self.assertIn("ck_flight_exception_links_status", constraints)
+
     def test_alembic_mission_creation_round_trip_sqlite(self):
         with TemporaryDirectory() as temp_dir:
             database_url = f"sqlite+pysqlite:///{Path(temp_dir) / 'test.db'}"
@@ -89,10 +101,13 @@ class MissionModelTests(unittest.TestCase):
                     set(inspect(engine).get_table_names()),
                 )
                 self.assertIn("flight_events", set(inspect(engine).get_table_names()))
+                self.assertIn(
+                    "flight_exception_links", set(inspect(engine).get_table_names())
+                )
             finally:
                 engine.dispose()
 
-            command.downgrade(config, "20260627_0007")
+            command.downgrade(config, "20260627_0008")
             engine = build_session_factory(database_url).kw["bind"]
             try:
                 self.assertIn("missions", set(inspect(engine).get_table_names()))
@@ -100,7 +115,10 @@ class MissionModelTests(unittest.TestCase):
                 self.assertIn(
                     "mission_dispatch_receipts", set(inspect(engine).get_table_names())
                 )
-                self.assertNotIn("flight_events", set(inspect(engine).get_table_names()))
+                self.assertIn("flight_events", set(inspect(engine).get_table_names()))
+                self.assertNotIn(
+                    "flight_exception_links", set(inspect(engine).get_table_names())
+                )
             finally:
                 engine.dispose()
 
@@ -565,6 +583,114 @@ class MissionServiceTests(unittest.TestCase):
                 )
 
         self.assertEqual(raised.exception.code, "TENANT_404")
+
+    def test_links_low_battery_exception_once_and_lists_it(self):
+        event_id = self._record_flight_event("low_battery")
+        exceptions_module = importlib.import_module("app.flight_exceptions")
+        with self.session_factory() as session:
+            service = exceptions_module.FlightExceptionService(session)
+            first = service.link_exception(
+                "u_customer_a_operator",
+                "t_customer_001",
+                "ms_a",
+                event_id,
+                "exception-low-battery",
+                RequestMeta("req_exception_low_battery", "127.0.0.1"),
+            )
+            replay = service.link_exception(
+                "u_customer_a_operator",
+                "t_customer_001",
+                "ms_a",
+                event_id,
+                "exception-low-battery",
+                RequestMeta("req_exception_low_battery", "127.0.0.1"),
+            )
+            listed = service.list_exceptions("t_customer_001", "ms_a")
+
+        self.assertEqual(replay, first)
+        self.assertEqual(first["exception_code"], "LOW_BATTERY")
+        self.assertEqual(first["severity"], "HIGH")
+        self.assertEqual(first["status"], "OPEN")
+        self.assertEqual(first["flight_event_id"], event_id)
+        self.assertEqual([item["id"] for item in listed], [first["id"]])
+
+    def test_exception_link_writes_audit(self):
+        event_id = self._record_flight_event("device_unresponsive")
+        exceptions_module = importlib.import_module("app.flight_exceptions")
+        with self.session_factory() as session:
+            service = exceptions_module.FlightExceptionService(session)
+            linked = service.link_exception(
+                "u_customer_a_operator",
+                "t_customer_001",
+                "ms_a",
+                event_id,
+                "exception-audit",
+                RequestMeta("req_exception_audit", "127.0.0.1"),
+            )
+
+        with self.session_factory() as session:
+            audit = session.scalar(
+                select(AuditLogModel).where(
+                    AuditLogModel.request_id == "req_exception_audit"
+                )
+            )
+
+        self.assertEqual(audit.action, "flight_exception_linked")
+        self.assertEqual(audit.resource_id, linked["id"])
+
+    def test_unsupported_exception_event_returns_mission_422(self):
+        event_id = self._record_flight_event("telemetry")
+        exceptions_module = importlib.import_module("app.flight_exceptions")
+        with self.session_factory() as session:
+            service = exceptions_module.FlightExceptionService(session)
+            with self.assertRaises(DomainError) as raised:
+                service.link_exception(
+                    "u_customer_a_operator",
+                    "t_customer_001",
+                    "ms_a",
+                    event_id,
+                    "exception-unsupported",
+                    RequestMeta("req_exception_unsupported", "127.0.0.1"),
+                )
+
+        self.assertEqual(raised.exception.code, "MISSION_422")
+
+    def test_exception_link_cross_tenant_mission_returns_tenant_404(self):
+        event_id = self._record_flight_event("low_battery")
+        exceptions_module = importlib.import_module("app.flight_exceptions")
+        with self.session_factory() as session:
+            service = exceptions_module.FlightExceptionService(session)
+            with self.assertRaises(DomainError) as raised:
+                service.link_exception(
+                    "u_customer_b_operator",
+                    "t_customer_002",
+                    "ms_a",
+                    event_id,
+                    "exception-cross",
+                    RequestMeta("req_exception_cross", "127.0.0.1"),
+                )
+
+        self.assertEqual(raised.exception.code, "TENANT_404")
+
+    def _record_flight_event(self, event_code: str, mission_id: str = "ms_a") -> str:
+        telemetry_module = importlib.import_module("app.telemetry_events")
+        event = FlightEvent(
+            event_code=event_code,
+            event_time=datetime(2026, 7, 1, 9, 2, tzinfo=timezone.utc),
+            device_sn="dock-a",
+            raw_payload={"battery": 18, "signal": -70},
+        )
+        with self.session_factory() as session:
+            service = telemetry_module.TelemetryEventService(session)
+            result = service.record_event(
+                "u_customer_a_operator",
+                "t_customer_001",
+                mission_id,
+                event,
+                f"telemetry-{event_code}-{mission_id}",
+                RequestMeta(f"req_telemetry_{event_code}", "127.0.0.1"),
+            )
+        return result["id"]
 
 
 if __name__ == "__main__":
