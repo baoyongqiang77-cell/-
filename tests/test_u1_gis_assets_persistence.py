@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import inspect
+from sqlalchemy import select
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "apps" / "api"))
@@ -14,12 +15,15 @@ sys.path.insert(0, str(ROOT / "src"))
 from app.bootstrap import bootstrap_u0
 from app.database import build_session_factory
 from app.models import (
+    AuditLogModel,
     Base,
     BridgeAssetModel,
     CoordinateTransformModel,
     RoadAssetModel,
     SlopeAssetModel,
 )
+from app.repositories import RequestMeta
+from drone_inspection.errors import DomainError
 
 
 class GisAssetModelTests(unittest.TestCase):
@@ -216,6 +220,221 @@ class GisAssetRepositoryTests(unittest.TestCase):
         self.assertEqual(bridge["structure_parts"], ["pier", "deck"])
         self.assertEqual(slope["side"], "LEFT")
         self.assertEqual(transform["source_crs"], "WGS84")
+
+
+class GisAssetServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.database_url = f"sqlite+pysqlite:///{Path(self.temp_dir.name) / 'svc.db'}"
+        self.session_factory = build_session_factory(self.database_url)
+        Base.metadata.create_all(self.session_factory.kw["bind"])
+        with self.session_factory() as session:
+            bootstrap_u0(session)
+            session.add(
+                BridgeAssetModel(
+                    id="bridge_existing",
+                    tenant_id="t_customer_001",
+                    bridge_code="BR-EXIST",
+                    bridge_name="Existing Bridge",
+                    route_code="G60",
+                    stake_no=1000,
+                    geom_json={"type": "Point", "coordinates": [0, 0]},
+                    structure_parts=[],
+                )
+            )
+            session.add(
+                CoordinateTransformModel(
+                    id="ctr_existing",
+                    tenant_id="t_customer_001",
+                    source_crs="WGS84",
+                    target_crs="CGCS2000",
+                    method="CONFIG_ONLY",
+                    params_json={"note": "pending"},
+                    version="v1",
+                    status="PENDING_CONFIRMATION",
+                )
+            )
+            session.commit()
+
+    def tearDown(self):
+        self.session_factory.kw["bind"].dispose()
+        self.temp_dir.cleanup()
+
+    def test_creates_road_asset_once_with_idempotent_replay(self):
+        from app.gis_assets import GisAssetService
+
+        with self.session_factory() as session:
+            service = GisAssetService(session)
+            values = {
+                "route_code": "G60",
+                "road_name": "G60 Main",
+                "direction": "UP",
+                "start_stake": 1000,
+                "end_stake": 2000,
+                "geom_json": {"type": "LineString", "coordinates": []},
+                "source": "MANUAL_IMPORT",
+                "crs": "PENDING_CONFIRMATION",
+                "data_version": "manual-v1",
+            }
+            first = service.create_road_asset(
+                "u_platform_admin",
+                "t_customer_001",
+                values,
+                "road-key",
+                RequestMeta("req_road_create", "127.0.0.1"),
+            )
+            replay = service.create_road_asset(
+                "u_platform_admin",
+                "t_customer_001",
+                values,
+                "road-key",
+                RequestMeta("req_road_create", "127.0.0.1"),
+            )
+
+        self.assertEqual(replay, first)
+        self.assertEqual(first["tenant_id"], "t_customer_001")
+        self.assertEqual(first["crs"], "PENDING_CONFIRMATION")
+
+    def test_invalid_stake_range_returns_gis_422(self):
+        from app.gis_assets import GisAssetService
+
+        with self.session_factory() as session:
+            service = GisAssetService(session)
+            with self.assertRaises(DomainError) as raised:
+                service.create_road_asset(
+                    "u_platform_admin",
+                    "t_customer_001",
+                    {
+                        "route_code": "G60",
+                        "road_name": "Bad Range",
+                        "direction": "UP",
+                        "start_stake": 2000,
+                        "end_stake": 1000,
+                        "geom_json": {"type": "LineString", "coordinates": []},
+                    },
+                    "bad-range",
+                    RequestMeta("req_bad_range", "127.0.0.1"),
+                )
+        self.assertEqual(raised.exception.code, "GIS_422")
+
+    def test_invalid_geom_returns_gis_422(self):
+        from app.gis_assets import GisAssetService
+
+        with self.session_factory() as session:
+            service = GisAssetService(session)
+            with self.assertRaises(DomainError) as raised:
+                service.create_slope_asset(
+                    "u_platform_admin",
+                    "t_customer_001",
+                    {
+                        "slope_code": "SL-BAD",
+                        "route_code": "G60",
+                        "start_stake": 100,
+                        "end_stake": 200,
+                        "side": "LEFT",
+                        "geom_json": {"type": "Circle", "coordinates": []},
+                    },
+                    "bad-geom",
+                    RequestMeta("req_bad_geom", "127.0.0.1"),
+                )
+        self.assertEqual(raised.exception.code, "GIS_422")
+
+    def test_invalid_crs_returns_gis_422(self):
+        from app.gis_assets import GisAssetService
+
+        with self.session_factory() as session:
+            service = GisAssetService(session)
+            with self.assertRaises(DomainError) as raised:
+                service.create_coordinate_transform(
+                    "u_platform_admin",
+                    "t_customer_001",
+                    {
+                        "source_crs": "BD09",
+                        "target_crs": "CGCS2000",
+                        "method": "CONFIG_ONLY",
+                        "params_json": {},
+                        "version": "v2",
+                        "status": "PENDING_CONFIRMATION",
+                    },
+                    "bad-crs",
+                    RequestMeta("req_bad_crs", "127.0.0.1"),
+                )
+        self.assertEqual(raised.exception.code, "GIS_422")
+
+    def test_duplicate_bridge_code_returns_mission_422(self):
+        from app.gis_assets import GisAssetService
+
+        with self.session_factory() as session:
+            service = GisAssetService(session)
+            with self.assertRaises(DomainError) as raised:
+                service.create_bridge_asset(
+                    "u_platform_admin",
+                    "t_customer_001",
+                    {
+                        "bridge_code": "BR-EXIST",
+                        "bridge_name": "Duplicate Bridge",
+                        "route_code": "G60",
+                        "stake_no": 1200,
+                        "geom_json": {"type": "Point", "coordinates": [0, 0]},
+                        "structure_parts": [],
+                    },
+                    "duplicate-bridge",
+                    RequestMeta("req_dup_bridge", "127.0.0.1"),
+                )
+        self.assertEqual(raised.exception.code, "MISSION_422")
+
+    def test_same_idempotency_key_is_independent_between_tenants(self):
+        from app.gis_assets import GisAssetService
+
+        values = {
+            "slope_code": "SL-IDEMP",
+            "route_code": "G60",
+            "start_stake": 100,
+            "end_stake": 200,
+            "side": "LEFT",
+            "geom_json": {"type": "Polygon", "coordinates": []},
+        }
+        with self.session_factory() as session:
+            service = GisAssetService(session)
+            first = service.create_slope_asset(
+                "u_platform_admin",
+                "t_customer_001",
+                values,
+                "same-slope-key",
+                RequestMeta("req_slope_a", "127.0.0.1"),
+            )
+            second = service.create_slope_asset(
+                "u_platform_admin",
+                "t_customer_002",
+                values,
+                "same-slope-key",
+                RequestMeta("req_slope_b", "127.0.0.1"),
+            )
+
+        self.assertNotEqual(first["tenant_id"], second["tenant_id"])
+
+    def test_updates_coordinate_transform_status_and_audits(self):
+        from app.gis_assets import GisAssetService
+
+        with self.session_factory() as session:
+            service = GisAssetService(session)
+            response = service.update_coordinate_transform(
+                "u_platform_admin",
+                "t_customer_001",
+                "ctr_existing",
+                {"status": "ACTIVE", "params_json": {"source": "manual-review"}},
+                "update-transform",
+                RequestMeta("req_ctr_update", "127.0.0.1"),
+            )
+
+        self.assertEqual(response["status"], "ACTIVE")
+        with self.session_factory() as session:
+            audit = session.scalar(
+                select(AuditLogModel).where(
+                    AuditLogModel.request_id == "req_ctr_update"
+                )
+            )
+        self.assertEqual(audit.action, "coordinate_transform_updated")
 
 
 if __name__ == "__main__":
