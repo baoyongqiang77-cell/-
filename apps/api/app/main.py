@@ -41,6 +41,12 @@ from .gis_assets import (
     slope_asset_payload,
 )
 from .repositories import RequestMeta, U0Repository
+from .route_management import (
+    RouteManagementService,
+    RouteRepository,
+    route_payload,
+    route_version_payload,
+)
 
 
 ERROR_STATUS_CODES = {
@@ -63,7 +69,7 @@ ERROR_STATUS_CODES = {
 }
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-EXPECTED_DATABASE_REVISION = "20260627_0003"
+EXPECTED_DATABASE_REVISION = "20260627_0004"
 
 
 class FeatureEntitlementRequest(BaseModel):
@@ -280,6 +286,42 @@ class CoordinateTransformUpdateRequest(BaseModel):
         if "params_json" in self.model_fields_set and self.params_json is None:
             raise ValueError("params_json cannot be null")
         return self
+
+
+class RouteCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    route_code: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    description: str | None = None
+
+
+class RouteUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    route_code: str | None = Field(default=None, min_length=1)
+    name: str | None = Field(default=None, min_length=1)
+    description: str | None = None
+
+    @model_validator(mode="after")
+    def validate_update(self):
+        if not self.model_fields_set:
+            raise ValueError("at least one update field is required")
+        return self
+
+
+class RouteVersionCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: str = Field(min_length=1)
+    route_file_uri: str = Field(min_length=1)
+    route_format: str = Field(min_length=1)
+    checksum: str = Field(min_length=1)
+    path_geom_json: dict
+    asset_bindings: list = Field(default_factory=list)
+    validation_report: dict = Field(default_factory=dict)
+    dji_route_id: str | None = None
+    uploaded_at: datetime | None = None
 
 
 def create_app(database_url_override: str | None = None) -> FastAPI:
@@ -948,6 +990,182 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
             ),
         )
 
+    @app.get("/api/v1/routes", tags=["U1 routes"])
+    def list_routes(
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        routes = RouteRepository(repo.session)
+        return {
+            "items": [
+                route_payload(item) for item in routes.list_routes(context.tenant_id)
+            ]
+        }
+
+    @app.get("/api/v1/routes/{route_id}", tags=["U1 routes"])
+    def get_route(
+        route_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        routes = RouteRepository(repo.session)
+        try:
+            return route_payload(routes.route(context.tenant_id, route_id))
+        except DomainError as exc:
+            _commit_route_read_denial(
+                request, repo, actor, context, meta, exc, "route", route_id
+            )
+            raise
+
+    @app.get("/api/v1/routes/{route_id}/versions", tags=["U1 routes"])
+    def list_route_versions(
+        route_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        routes = RouteRepository(repo.session)
+        try:
+            return {
+                "items": [
+                    route_version_payload(item)
+                    for item in routes.list_versions(context.tenant_id, route_id)
+                ]
+            }
+        except DomainError as exc:
+            _commit_route_read_denial(
+                request, repo, actor, context, meta, exc, "route", route_id
+            )
+            raise
+
+    @app.get("/api/v1/routes/{route_id}/versions/{version_id}", tags=["U1 routes"])
+    def get_route_version(
+        route_id: str,
+        version_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        routes = RouteRepository(repo.session)
+        try:
+            return route_version_payload(
+                routes.version(context.tenant_id, route_id, version_id)
+            )
+        except DomainError as exc:
+            _commit_route_read_denial(
+                request, repo, actor, context, meta, exc, "route_version", version_id
+            )
+            raise
+
+    @app.post("/api/v1/admin/routes", tags=["U1 routes"])
+    def create_route(
+        payload: RouteCreateRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _route_write_context(request, repo, actor, x_tenant_id, meta)
+        service = RouteManagementService(repo.session)
+        return _run_route_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "route",
+            None,
+            lambda: service.create_route(
+                actor.id,
+                context.tenant_id,
+                payload.model_dump(),
+                idempotency_key,
+                meta,
+            ),
+        )
+
+    @app.patch("/api/v1/admin/routes/{route_id}", tags=["U1 routes"])
+    def update_route(
+        route_id: str,
+        payload: RouteUpdateRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _route_write_context(request, repo, actor, x_tenant_id, meta)
+        service = RouteManagementService(repo.session)
+        return _run_route_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "route",
+            route_id,
+            lambda: service.update_route(
+                actor.id,
+                context.tenant_id,
+                route_id,
+                payload.model_dump(exclude_unset=True),
+                idempotency_key,
+                meta,
+            ),
+        )
+
+    @app.post("/api/v1/admin/routes/{route_id}/versions", tags=["U1 routes"])
+    def create_route_version(
+        route_id: str,
+        payload: RouteVersionCreateRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _route_write_context(request, repo, actor, x_tenant_id, meta)
+        service = RouteManagementService(repo.session)
+        return _run_route_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "route_version",
+            route_id,
+            lambda: service.create_route_version(
+                actor.id,
+                context.tenant_id,
+                route_id,
+                payload.model_dump(),
+                idempotency_key,
+                meta,
+            ),
+        )
+
     @app.post("/api/v1/admin/devices", tags=["U1 device registry"])
     def create_device(
         payload: DeviceCreateRequest,
@@ -1212,6 +1430,32 @@ def _commit_gis_read_denial(
     )
 
 
+def _commit_route_read_denial(
+    request: Request,
+    repo: U0Repository,
+    actor: Actor,
+    context: TenantContext,
+    meta: RequestMeta,
+    error: DomainError,
+    resource_type: str,
+    resource_id: str,
+) -> None:
+    if error.code != "TENANT_404":
+        return
+    repo.session.rollback()
+    error.request_id = meta.request_id
+    U0Repository.commit_denial_audit(
+        request.app.state.session_factory,
+        tenant_id=context.tenant_id,
+        actor=actor.id,
+        action="route_read_denied",
+        resource_type=resource_type,
+        resource_id=resource_id,
+        request_meta=meta,
+        code=error.code,
+    )
+
+
 def _registry_write_context(
     request: Request,
     repo: U0Repository,
@@ -1254,6 +1498,33 @@ def _gis_write_context(
         {"PLATFORM_ADMIN"},
         meta,
         action="gis_asset_write_denied",
+    )
+    _require_feature(
+        request,
+        repo,
+        actor,
+        context,
+        FeatureCode.FLIGHT_CONTROL,
+        meta,
+    )
+    return context
+
+
+def _route_write_context(
+    request: Request,
+    repo: U0Repository,
+    actor: Actor,
+    target_tenant_id: str | None,
+    meta: RequestMeta,
+) -> TenantContext:
+    context = _resolve_context(request, repo, actor, target_tenant_id, meta)
+    _require_roles(
+        request,
+        repo,
+        actor,
+        {"PLATFORM_ADMIN"},
+        meta,
+        action="route_write_denied",
     )
     _require_feature(
         request,
@@ -1318,6 +1589,36 @@ def _run_gis_write(
             tenant_id=context.tenant_id,
             actor=actor.id,
             action="gis_asset_write_denied",
+            resource_type=resource_type,
+            resource_id=resource_id,
+            request_meta=meta,
+            code=exc.code,
+        )
+        raise
+
+
+def _run_route_write(
+    request: Request,
+    repo: U0Repository,
+    actor: Actor,
+    context: TenantContext,
+    meta: RequestMeta,
+    resource_type: str,
+    resource_id: str | None,
+    operation: Callable[[], dict],
+) -> dict:
+    try:
+        return operation()
+    except DomainError as exc:
+        if exc.code not in {"IDEMP_409", "MISSION_422", "GIS_422", "TENANT_404"}:
+            raise
+        repo.session.rollback()
+        exc.request_id = meta.request_id
+        U0Repository.commit_denial_audit(
+            request.app.state.session_factory,
+            tenant_id=context.tenant_id,
+            actor=actor.id,
+            action="route_write_denied",
             resource_type=resource_type,
             resource_id=resource_id,
             request_meta=meta,

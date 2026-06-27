@@ -56,6 +56,8 @@ EXPECTED_TABLES = {
     "bridge_assets",
     "slope_assets",
     "coordinate_transforms",
+    "routes",
+    "route_versions",
 }
 
 
