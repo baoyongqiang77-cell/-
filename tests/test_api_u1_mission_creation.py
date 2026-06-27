@@ -405,6 +405,85 @@ class MissionCreationApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["code"], "STATE_409")
 
+    def test_customer_records_and_reads_telemetry_event_once(self):
+        payload = {
+            "event_code": "telemetry",
+            "event_time": "2026-07-01T09:01:00+00:00",
+            "device_sn": "dock-a",
+            "raw_payload": {"battery": 82, "signal": -58, "mission_status": "EXECUTING"},
+        }
+        headers = {
+            "Authorization": "Bearer demo-customer-a",
+            "Idempotency-Key": "telemetry-api-001",
+        }
+        first = self.client.post(
+            "/api/v1/missions/ms_a/telemetry-events",
+            json=payload,
+            headers=headers,
+        )
+        replay = self.client.post(
+            "/api/v1/missions/ms_a/telemetry-events",
+            json=payload,
+            headers=headers,
+        )
+        listed = self.client.get(
+            "/api/v1/missions/ms_a/telemetry-events",
+            headers={"Authorization": "Bearer demo-customer-a"},
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(replay.json(), first.json())
+        self.assertEqual(listed.json()["items"][0]["id"], first.json()["id"])
+        self.assertEqual(first.json()["payload_json"]["raw_payload"]["battery"], 82)
+
+    def test_telemetry_event_requires_idempotency_key(self):
+        response = self.client.post(
+            "/api/v1/missions/ms_a/telemetry-events",
+            json={
+                "event_code": "telemetry",
+                "event_time": "2026-07-01T09:01:00+00:00",
+                "device_sn": "dock-a",
+                "raw_payload": {"battery": 82},
+            },
+            headers={"Authorization": "Bearer demo-customer-a"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "IDEMP_409")
+
+    def test_telemetry_cross_tenant_does_not_reveal_mission(self):
+        response = self.client.get(
+            "/api/v1/missions/ms_a/telemetry-events",
+            headers={"Authorization": "Bearer demo-customer-b"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "TENANT_404")
+
+    def test_telemetry_websocket_sends_current_snapshot(self):
+        self.client.post(
+            "/api/v1/missions/ms_a/telemetry-events",
+            json={
+                "event_code": "telemetry",
+                "event_time": "2026-07-01T09:01:00+00:00",
+                "device_sn": "dock-a",
+                "raw_payload": {"battery": 82, "signal": -58},
+            },
+            headers={
+                "Authorization": "Bearer demo-customer-a",
+                "Idempotency-Key": "telemetry-ws-seed",
+            },
+        )
+
+        with self.client.websocket_connect(
+            "/api/v1/missions/ms_a/telemetry/ws",
+            headers={"Authorization": "Bearer demo-customer-a"},
+        ) as websocket:
+            snapshot = websocket.receive_json()
+
+        self.assertEqual(snapshot["mission_id"], "ms_a")
+        self.assertEqual(snapshot["items"][0]["payload_json"]["raw_payload"]["battery"], 82)
+
     def test_forbidden_server_managed_fields_return_mission_422(self):
         payload = self._payload()
         payload["tenant_id"] = "t_customer_002"
@@ -435,6 +514,7 @@ class MissionCreationApiTests(unittest.TestCase):
             "/api/v1/missions/{mission_id}/approvals/{approval_id}/reject", paths
         )
         self.assertIn("/api/v1/missions/{mission_id}/dispatch", paths)
+        self.assertIn("/api/v1/missions/{mission_id}/telemetry-events", paths)
 
 
 if __name__ == "__main__":

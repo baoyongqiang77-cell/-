@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "apps" / "api"))
 sys.path.insert(0, str(ROOT / "src"))
 
+from drone_inspection.dji_gateway import FlightEvent
+
 from app.bootstrap import bootstrap_u0
 from app.database import build_session_factory
 from app.models import (
@@ -34,6 +36,7 @@ class MissionModelTests(unittest.TestCase):
         self.assertIn("missions", Base.metadata.tables)
         self.assertIn("mission_approvals", Base.metadata.tables)
         self.assertIn("mission_dispatch_receipts", Base.metadata.tables)
+        self.assertIn("flight_events", Base.metadata.tables)
 
     def test_mission_model_registers_required_constraints(self):
         models = importlib.import_module("app.models")
@@ -62,6 +65,12 @@ class MissionModelTests(unittest.TestCase):
         self.assertIn("ck_mission_dispatch_receipts_gateway_mode", constraints)
         self.assertIn("fk_mission_dispatch_receipts_tenant_mission", constraints)
 
+    def test_flight_event_model_registers_required_constraints(self):
+        models = importlib.import_module("app.models")
+        constraints = {item.name for item in models.FlightEventModel.__table__.constraints}
+
+        self.assertIn("fk_flight_events_tenant_mission", constraints)
+
     def test_alembic_mission_creation_round_trip_sqlite(self):
         with TemporaryDirectory() as temp_dir:
             database_url = f"sqlite+pysqlite:///{Path(temp_dir) / 'test.db'}"
@@ -79,18 +88,19 @@ class MissionModelTests(unittest.TestCase):
                     "mission_dispatch_receipts",
                     set(inspect(engine).get_table_names()),
                 )
+                self.assertIn("flight_events", set(inspect(engine).get_table_names()))
             finally:
                 engine.dispose()
 
-            command.downgrade(config, "20260627_0006")
+            command.downgrade(config, "20260627_0007")
             engine = build_session_factory(database_url).kw["bind"]
             try:
                 self.assertIn("missions", set(inspect(engine).get_table_names()))
                 self.assertIn("mission_approvals", set(inspect(engine).get_table_names()))
-                self.assertNotIn(
-                    "mission_dispatch_receipts",
-                    set(inspect(engine).get_table_names()),
+                self.assertIn(
+                    "mission_dispatch_receipts", set(inspect(engine).get_table_names())
                 )
+                self.assertNotIn("flight_events", set(inspect(engine).get_table_names()))
             finally:
                 engine.dispose()
 
@@ -500,6 +510,61 @@ class MissionServiceTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "DJI_502")
         self.assertEqual(mission.status, "APPROVED")
+
+    def test_records_telemetry_event_once_and_lists_it(self):
+        telemetry_module = importlib.import_module("app.telemetry_events")
+        event = FlightEvent(
+            event_code="telemetry",
+            event_time=datetime(2026, 7, 1, 9, 1, tzinfo=timezone.utc),
+            device_sn="dock-a",
+            raw_payload={"battery": 82, "signal": -58, "mission_status": "EXECUTING"},
+        )
+        with self.session_factory() as session:
+            service = telemetry_module.TelemetryEventService(session)
+            first = service.record_event(
+                "u_customer_a_operator",
+                "t_customer_001",
+                "ms_a",
+                event,
+                "telemetry-001",
+                RequestMeta("req_telemetry", "127.0.0.1"),
+            )
+            replay = service.record_event(
+                "u_customer_a_operator",
+                "t_customer_001",
+                "ms_a",
+                event,
+                "telemetry-001",
+                RequestMeta("req_telemetry", "127.0.0.1"),
+            )
+            listed = service.list_events("t_customer_001", "ms_a")
+
+        self.assertEqual(replay, first)
+        self.assertEqual(first["payload_json"]["event_code"], "telemetry")
+        self.assertEqual(first["payload_json"]["raw_payload"]["battery"], 82)
+        self.assertEqual([item["id"] for item in listed], [first["id"]])
+
+    def test_telemetry_event_cross_tenant_mission_returns_tenant_404(self):
+        telemetry_module = importlib.import_module("app.telemetry_events")
+        event = FlightEvent(
+            event_code="telemetry",
+            event_time=datetime(2026, 7, 1, 9, 1, tzinfo=timezone.utc),
+            device_sn="dock-a",
+            raw_payload={"battery": 82, "signal": -58},
+        )
+        with self.session_factory() as session:
+            service = telemetry_module.TelemetryEventService(session)
+            with self.assertRaises(DomainError) as raised:
+                service.record_event(
+                    "u_customer_b_operator",
+                    "t_customer_002",
+                    "ms_a",
+                    event,
+                    "telemetry-cross",
+                    RequestMeta("req_telemetry_cross", "127.0.0.1"),
+                )
+
+        self.assertEqual(raised.exception.code, "TENANT_404")
 
 
 if __name__ == "__main__":

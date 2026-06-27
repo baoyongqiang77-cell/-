@@ -633,3 +633,28 @@ class MissionDispatchReceiptModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
+
+
+class FlightEventModel(Base):
+    __tablename__ = "flight_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "mission_id"],
+            ["missions.tenant_id", "missions.id"],
+            name="fk_flight_events_tenant_mission",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    mission_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    device_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    device_sn: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
