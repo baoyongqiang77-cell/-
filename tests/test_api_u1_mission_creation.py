@@ -304,6 +304,107 @@ class MissionCreationApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["code"], "TENANT_404")
 
+    def _approve_seed_mission_via_api(self):
+        submit = self.client.post(
+            "/api/v1/missions/ms_a/submit-approval",
+            json={"external_system": "BUILT_IN"},
+            headers={
+                "Authorization": "Bearer demo-customer-a",
+                "Idempotency-Key": "dispatch-api-submit",
+            },
+        )
+        self.client.post(
+            f"/api/v1/missions/ms_a/approvals/{submit.json()['id']}/approve",
+            json={"comment": "approved"},
+            headers={
+                "Authorization": "Bearer demo-customer-a",
+                "Idempotency-Key": "dispatch-api-approve",
+            },
+        )
+
+    def test_customer_dispatches_approved_mission_once(self):
+        self._approve_seed_mission_via_api()
+        headers = {
+            "Authorization": "Bearer demo-customer-a",
+            "Idempotency-Key": "dispatch-api-mission",
+        }
+        first = self.client.post(
+            "/api/v1/missions/ms_a/dispatch",
+            json={"dispatch_note": "start approved patrol"},
+            headers=headers,
+        )
+        replay = self.client.post(
+            "/api/v1/missions/ms_a/dispatch",
+            json={"dispatch_note": "start approved patrol"},
+            headers=headers,
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(replay.json(), first.json())
+        self.assertEqual(first.json()["mission_status"], "DISPATCHED")
+        self.assertEqual(first.json()["gateway_mode"], "SIMULATOR")
+        self.assertEqual(first.json()["raw_payload"]["execution_proof"], "SIMULATED_ONLY")
+
+    def test_dispatch_requires_idempotency_key(self):
+        self._approve_seed_mission_via_api()
+        response = self.client.post(
+            "/api/v1/missions/ms_a/dispatch",
+            json={},
+            headers={"Authorization": "Bearer demo-customer-a"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "IDEMP_409")
+
+    def test_dispatch_requires_flight_control_entitlement(self):
+        self._approve_seed_mission_via_api()
+        with self.session_factory() as session:
+            session.execute(
+                delete(TenantFeatureEntitlementModel).where(
+                    TenantFeatureEntitlementModel.tenant_id == "t_customer_001",
+                    TenantFeatureEntitlementModel.feature_code == "FLIGHT_CONTROL",
+                )
+            )
+            session.commit()
+
+        response = self.client.post(
+            "/api/v1/missions/ms_a/dispatch",
+            json={},
+            headers={
+                "Authorization": "Bearer demo-customer-a",
+                "Idempotency-Key": "dispatch-api-no-feature",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["code"], "FEATURE_403")
+
+    def test_dispatch_cross_tenant_does_not_reveal_mission(self):
+        response = self.client.post(
+            "/api/v1/missions/ms_a/dispatch",
+            json={},
+            headers={
+                "Authorization": "Bearer demo-customer-b",
+                "Idempotency-Key": "dispatch-api-cross-tenant",
+            },
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "TENANT_404")
+
+    def test_dispatch_rejects_non_approved_mission(self):
+        response = self.client.post(
+            "/api/v1/missions/ms_a/dispatch",
+            json={},
+            headers={
+                "Authorization": "Bearer demo-customer-a",
+                "Idempotency-Key": "dispatch-api-draft",
+            },
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "STATE_409")
+
     def test_forbidden_server_managed_fields_return_mission_422(self):
         payload = self._payload()
         payload["tenant_id"] = "t_customer_002"
@@ -333,6 +434,7 @@ class MissionCreationApiTests(unittest.TestCase):
         self.assertIn(
             "/api/v1/missions/{mission_id}/approvals/{approval_id}/reject", paths
         )
+        self.assertIn("/api/v1/missions/{mission_id}/dispatch", paths)
 
 
 if __name__ == "__main__":

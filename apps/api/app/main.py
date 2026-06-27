@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from drone_inspection.dji_gateway import DjiDock3Simulator
 from drone_inspection.constants import FeatureCode
 from drone_inspection.errors import DomainError
 from drone_inspection.foundation import TenantContext
@@ -74,7 +75,7 @@ ERROR_STATUS_CODES = {
 }
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-EXPECTED_DATABASE_REVISION = "20260627_0006"
+EXPECTED_DATABASE_REVISION = "20260627_0007"
 
 
 class FeatureEntitlementRequest(BaseModel):
@@ -354,6 +355,12 @@ class MissionApprovalRequest(BaseModel):
     external_status: str | None = None
     callback_payload: dict = Field(default_factory=dict)
     comment: str | None = None
+
+
+class MissionDispatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dispatch_note: str | None = None
 
 
 def create_app(database_url_override: str | None = None) -> FastAPI:
@@ -1374,6 +1381,39 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
             ),
         )
 
+    @app.post("/api/v1/missions/{mission_id}/dispatch", tags=["U1 missions"])
+    def dispatch_mission(
+        mission_id: str,
+        payload: MissionDispatchRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        service = MissionManagementService(repo.session)
+        return _run_mission_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "mission",
+            mission_id,
+            lambda: service.dispatch_mission(
+                actor.id,
+                context.tenant_id,
+                mission_id,
+                payload.model_dump(),
+                idempotency_key,
+                meta,
+                DjiDock3Simulator(),
+            ),
+        )
+
     @app.post("/api/v1/admin/devices", tags=["U1 device registry"])
     def create_device(
         payload: DeviceCreateRequest,
@@ -1820,6 +1860,7 @@ def _run_gis_write(
             "GIS_422",
             "TENANT_404",
             "STATE_409",
+            "DJI_502",
         }:
             raise
         repo.session.rollback()

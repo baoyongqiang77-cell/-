@@ -60,6 +60,7 @@ EXPECTED_TABLES = {
     "route_versions",
     "missions",
     "mission_approvals",
+    "mission_dispatch_receipts",
 }
 
 
