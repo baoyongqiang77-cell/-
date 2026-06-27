@@ -52,6 +52,10 @@ EXPECTED_TABLES = {
     "idempotency_records",
     "devices",
     "docks",
+    "road_assets",
+    "bridge_assets",
+    "slope_assets",
+    "coordinate_transforms",
 }
 
 

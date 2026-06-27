@@ -55,7 +55,7 @@ ERROR_STATUS_CODES = {
 }
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-EXPECTED_DATABASE_REVISION = "20260621_0002"
+EXPECTED_DATABASE_REVISION = "20260627_0003"
 
 
 class FeatureEntitlementRequest(BaseModel):
