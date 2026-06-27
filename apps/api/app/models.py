@@ -6,11 +6,13 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     JSON,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -165,4 +167,81 @@ class IdempotencyRecordModel(Base):
     response: Mapped[dict] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+class DeviceModel(Base):
+    __tablename__ = "devices"
+    __table_args__ = (
+        CheckConstraint(
+            "device_type IN ('DOCK', 'DRONE', 'PAYLOAD', 'EDGE_NODE')",
+            name="ck_devices_device_type",
+        ),
+        CheckConstraint(
+            "status IS NULL OR status IN ('ONLINE', 'OFFLINE')",
+            name="ck_devices_status",
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_devices_tenant_id_id"),
+        UniqueConstraint("serial_number", name="uq_devices_serial_number"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    device_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    manufacturer: Mapped[str] = mapped_column(String(128), nullable=False)
+    model: Mapped[str | None] = mapped_column(String(128))
+    serial_number: Mapped[str] = mapped_column(String(128), nullable=False)
+    firmware_version: Mapped[str | None] = mapped_column(String(128))
+    status: Mapped[str | None] = mapped_column(String(16))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class DockModel(Base):
+    __tablename__ = "docks"
+    __table_args__ = (
+        UniqueConstraint("device_id", name="uq_docks_device_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "device_id"],
+            ["devices.tenant_id", "devices.id"],
+            name="fk_docks_tenant_device",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "bound_drone_device_id"],
+            ["devices.tenant_id", "devices.id"],
+            name="fk_docks_tenant_drone",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "edge_node_device_id"],
+            ["devices.tenant_id", "devices.id"],
+            name="fk_docks_tenant_edge_node",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    device_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    bound_drone_device_id: Mapped[str | None] = mapped_column(String(64))
+    edge_node_device_id: Mapped[str | None] = mapped_column(String(64))
+    environment_json: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
     )

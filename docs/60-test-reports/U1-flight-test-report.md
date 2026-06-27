@@ -8,6 +8,9 @@
 - `schema:flight_event_payload` 回调字段规范。
 - 飞行任务状态机与非法跳转拒绝。
 - 仅大疆机场 3 适配网关允许访问互联网的网络边界规则。
+- U1-F02 大疆机场 3、无人机、载荷、边缘节点与机巢持久化台账。
+- 设备与机巢的租户隔离查询、平台管理员写入、幂等和审计。
+- 归一化 `ONLINE/OFFLINE` 状态同步与机巢环境快照白名单。
 
 ## 自动化用例
 
@@ -26,18 +29,43 @@
 | 仅 `dji_gateway` 可访问互联网，业务服务被阻断 | PASS |
 | U1-F01 与现有飞控规则共 19 项聚焦测试 | PASS |
 
+### U1-F02 设备与机巢台账
+
+| 用例 | 结果 |
+| --- | --- |
+| 设备与机巢列表、详情始终按当前服务租户过滤 | PASS |
+| 客户租户只能读取本租户台账，跨租户详情统一返回 `TENANT_404` 并审计 | PASS |
+| 仅平台管理员可新增、修改设备与机巢，拒绝操作写独立事务审计 | PASS |
+| 写请求必须携带 `Idempotency-Key`，幂等范围按目标租户隔离 | PASS |
+| 请求体禁止覆盖 `tenant_id`、`status` 等服务端管理字段 | PASS |
+| 设备序列号全局唯一，同一机巢设备不可重复建档 | PASS |
+| 机巢、绑定无人机和边缘节点由数据库组合外键约束为同租户 | PASS |
+| `device_bound` 不设置在线状态，只有规范 `device_status` 更新 `ONLINE/OFFLINE` | PASS |
+| `ONLINE` 更新时间，`OFFLINE` 保留最后在线时间，非法状态返回 `DJI_502` | PASS |
+| 机巢环境快照只持久化 `dock_door/charging/weather/payload_status` | PASS |
+| U1-F02 API 与持久化聚焦测试共 39 项 | PASS |
+| 全项目自动化测试共 120 项 | PASS |
+| Python 源码编译与 `git diff --check` | PASS |
+| Linux PostgreSQL 迁移脚本静态语法校验 | PASS |
+| 云端 PostgreSQL `upgrade/downgrade/upgrade` 实测 | PASS：2026-06-26 在 `8.163.127.126:/opt/drone-u1-f02-migration-test` 通过，测试端口 `55433` |
+
 ## 自动化命令
 
 ```powershell
 & '.\.venv\Scripts\python.exe' -m unittest tests.test_u1_dji_gateway_contract tests.test_u1_flight -v
+& '.\.venv\Scripts\python.exe' -m unittest tests.test_api_u1_device_registry tests.test_u1_device_registry_persistence -v
+& '.\.venv\Scripts\python.exe' -m unittest discover -s tests -v
+& '.\.venv\Scripts\python.exe' -m compileall -q src apps/api/app
+# 云端：U0_POSTGRES_TEST_PORT=55433 ./scripts/test_postgres_migrations.sh
 ```
 
 ## 未纳入本增量
 
 - DJI Cloud API 版本、凭证、回调签名、配套无人机和载荷型号仍待确认。
 - 模拟器仅作为 M1 开发证据，不能满足真实飞行或生产验收。
-- 设备、航线、任务、审批、遥测 WebSocket 和 `flight_events` 持久化属于后续 U1 增量。
+- 航线、任务、审批、遥测 WebSocket 和 `flight_events` 持久化属于后续 U1 增量。
+- 云端 PostgreSQL 迁移实测已完成；远端通过本机确认的 ED25519 SSH 主机指纹后接入，Docker Hub 直连不可达时使用国内镜像源预拉取同一 `postgres:16-alpine` 镜像。
 
 ## 验收结论
 
-U1-F01 网关契约、开发模拟器和状态机规则级验收通过。当前结果证明统一接口和模拟闭环可用，不代表真实 DJI 飞控或生产网络验收通过。
+U1-F01 网关契约、开发模拟器和状态机规则级验收通过；U1-F02 设备与机巢台账的本地自动化验收和云端 PostgreSQL 迁移 `upgrade/downgrade/upgrade` 实测均通过。当前结果不代表真实 DJI 设备、DJI Cloud API、配套无人机/载荷型号、真实飞行或生产网络验收通过。

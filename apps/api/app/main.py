@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
 import re
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -23,6 +25,12 @@ from .dependencies import (
     repository,
     request_meta,
     resolve_tenant_context,
+)
+from .device_registry import (
+    DeviceRegistryRepository,
+    DeviceRegistryService,
+    device_payload,
+    dock_payload,
 )
 from .repositories import RequestMeta, U0Repository
 
@@ -47,7 +55,7 @@ ERROR_STATUS_CODES = {
 }
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-EXPECTED_DATABASE_REVISION = "20260618_0001"
+EXPECTED_DATABASE_REVISION = "20260621_0002"
 
 
 class FeatureEntitlementRequest(BaseModel):
@@ -71,6 +79,60 @@ class TenantDataGrantRequest(BaseModel):
     def validate_date_range(self):
         if self.expires_at <= self.effective_from:
             raise ValueError("expires_at must be later than effective_from")
+        return self
+
+
+class DeviceCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    device_type: Literal["DOCK", "DRONE", "PAYLOAD", "EDGE_NODE"]
+    name: str = Field(min_length=1)
+    manufacturer: str = Field(min_length=1)
+    model: str | None = None
+    serial_number: str = Field(min_length=1)
+    firmware_version: str | None = None
+
+
+class DeviceUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1)
+    manufacturer: str | None = Field(default=None, min_length=1)
+    model: str | None = None
+    firmware_version: str | None = None
+
+    @model_validator(mode="after")
+    def validate_update(self):
+        if not self.model_fields_set:
+            raise ValueError("at least one update field is required")
+        for field_name in ("name", "manufacturer"):
+            if field_name in self.model_fields_set and getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} cannot be null")
+        return self
+
+
+class DockCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    device_id: str = Field(min_length=1)
+    bound_drone_device_id: str | None = None
+    edge_node_device_id: str | None = None
+    environment_json: dict = Field(default_factory=dict)
+
+
+class DockUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bound_drone_device_id: str | None = None
+    edge_node_device_id: str | None = None
+    environment_json: dict | None = None
+
+    @model_validator(mode="after")
+    def validate_update(self):
+        if not self.model_fields_set:
+            raise ValueError("at least one update field is required")
+        if "environment_json" in self.model_fields_set and self.environment_json is None:
+            raise ValueError("environment_json cannot be null")
         return self
 
 
@@ -258,6 +320,209 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
             "items": [_audit_log_payload(log) for log in repo.audit_logs(tenant_id)]
         }
 
+    @app.get("/api/v1/devices", tags=["U1 device registry"])
+    def list_devices(
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        registry = DeviceRegistryRepository(repo.session)
+        return {
+            "items": [
+                device_payload(item)
+                for item in registry.list_devices(context.tenant_id)
+            ]
+        }
+
+    @app.get("/api/v1/devices/{device_id}", tags=["U1 device registry"])
+    def get_device(
+        device_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        registry = DeviceRegistryRepository(repo.session)
+        try:
+            return device_payload(registry.device(context.tenant_id, device_id))
+        except DomainError as exc:
+            _commit_registry_read_denial(
+                request, repo, actor, context, meta, exc, "device", device_id
+            )
+            raise
+
+    @app.get("/api/v1/docks", tags=["U1 device registry"])
+    def list_docks(
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        registry = DeviceRegistryRepository(repo.session)
+        return {
+            "items": [
+                dock_payload(item) for item in registry.list_docks(context.tenant_id)
+            ]
+        }
+
+    @app.get("/api/v1/docks/{dock_id}", tags=["U1 device registry"])
+    def get_dock(
+        dock_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        registry = DeviceRegistryRepository(repo.session)
+        try:
+            return dock_payload(registry.dock(context.tenant_id, dock_id))
+        except DomainError as exc:
+            _commit_registry_read_denial(
+                request, repo, actor, context, meta, exc, "dock", dock_id
+            )
+            raise
+
+    @app.post("/api/v1/admin/devices", tags=["U1 device registry"])
+    def create_device(
+        payload: DeviceCreateRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _registry_write_context(
+            request, repo, actor, x_tenant_id, meta
+        )
+        service = DeviceRegistryService(repo.session)
+        return _run_registry_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "device",
+            None,
+            lambda: service.create_device(
+                actor_id=actor.id,
+                tenant_id=context.tenant_id,
+                values=payload.model_dump(),
+                idempotency_key=idempotency_key,
+                request_meta=meta,
+            ),
+        )
+
+    @app.patch("/api/v1/admin/devices/{device_id}", tags=["U1 device registry"])
+    def update_device(
+        device_id: str,
+        payload: DeviceUpdateRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _registry_write_context(
+            request, repo, actor, x_tenant_id, meta
+        )
+        service = DeviceRegistryService(repo.session)
+        return _run_registry_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "device",
+            device_id,
+            lambda: service.update_device(
+                actor_id=actor.id,
+                tenant_id=context.tenant_id,
+                device_id=device_id,
+                values=payload.model_dump(exclude_unset=True),
+                idempotency_key=idempotency_key,
+                request_meta=meta,
+            ),
+        )
+
+    @app.post("/api/v1/admin/docks", tags=["U1 device registry"])
+    def create_dock(
+        payload: DockCreateRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _registry_write_context(
+            request, repo, actor, x_tenant_id, meta
+        )
+        service = DeviceRegistryService(repo.session)
+        return _run_registry_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "dock",
+            None,
+            lambda: service.create_dock(
+                actor_id=actor.id,
+                tenant_id=context.tenant_id,
+                values=payload.model_dump(),
+                idempotency_key=idempotency_key,
+                request_meta=meta,
+            ),
+        )
+
+    @app.patch("/api/v1/admin/docks/{dock_id}", tags=["U1 device registry"])
+    def update_dock(
+        dock_id: str,
+        payload: DockUpdateRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _registry_write_context(
+            request, repo, actor, x_tenant_id, meta
+        )
+        service = DeviceRegistryService(repo.session)
+        return _run_registry_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "dock",
+            dock_id,
+            lambda: service.update_dock(
+                actor_id=actor.id,
+                tenant_id=context.tenant_id,
+                dock_id=dock_id,
+                values=payload.model_dump(exclude_unset=True),
+                idempotency_key=idempotency_key,
+                request_meta=meta,
+            ),
+        )
+
     return app
 
 
@@ -306,6 +571,119 @@ def _require_roles(
             actor=actor.id,
             action=action,
             resource_type="admin_api",
+            request_meta=meta,
+            code=exc.code,
+        )
+        raise
+
+
+def _require_feature(
+    request: Request,
+    repo: U0Repository,
+    actor: Actor,
+    context: TenantContext,
+    feature: FeatureCode,
+    meta: RequestMeta,
+) -> None:
+    if context.has_feature(feature):
+        return
+    error = DomainError(
+        "FEATURE_403",
+        "当前租户未开通目标功能",
+        {"feature_code": feature.value},
+    )
+    repo.session.rollback()
+    error.request_id = meta.request_id
+    U0Repository.commit_denial_audit(
+        request.app.state.session_factory,
+        tenant_id=context.tenant_id,
+        actor=actor.id,
+        action="feature_denied",
+        resource_type="feature",
+        resource_id=feature.value,
+        request_meta=meta,
+        code=error.code,
+    )
+    raise error
+
+
+def _commit_registry_read_denial(
+    request: Request,
+    repo: U0Repository,
+    actor: Actor,
+    context: TenantContext,
+    meta: RequestMeta,
+    error: DomainError,
+    resource_type: str,
+    resource_id: str,
+) -> None:
+    if error.code != "TENANT_404":
+        return
+    repo.session.rollback()
+    error.request_id = meta.request_id
+    U0Repository.commit_denial_audit(
+        request.app.state.session_factory,
+        tenant_id=context.tenant_id,
+        actor=actor.id,
+        action="registry_read_denied",
+        resource_type=resource_type,
+        resource_id=resource_id,
+        request_meta=meta,
+        code=error.code,
+    )
+
+
+def _registry_write_context(
+    request: Request,
+    repo: U0Repository,
+    actor: Actor,
+    target_tenant_id: str | None,
+    meta: RequestMeta,
+) -> TenantContext:
+    context = _resolve_context(request, repo, actor, target_tenant_id, meta)
+    _require_roles(
+        request,
+        repo,
+        actor,
+        {"PLATFORM_ADMIN"},
+        meta,
+        action="registry_write_denied",
+    )
+    _require_feature(
+        request,
+        repo,
+        actor,
+        context,
+        FeatureCode.FLIGHT_CONTROL,
+        meta,
+    )
+    return context
+
+
+def _run_registry_write(
+    request: Request,
+    repo: U0Repository,
+    actor: Actor,
+    context: TenantContext,
+    meta: RequestMeta,
+    resource_type: str,
+    resource_id: str | None,
+    operation: Callable[[], dict],
+) -> dict:
+    try:
+        return operation()
+    except DomainError as exc:
+        if exc.code not in {"IDEMP_409", "MISSION_422", "TENANT_404"}:
+            raise
+        repo.session.rollback()
+        exc.request_id = meta.request_id
+        U0Repository.commit_denial_audit(
+            request.app.state.session_factory,
+            tenant_id=context.tenant_id,
+            actor=actor.id,
+            action="registry_write_denied",
+            resource_type=resource_type,
+            resource_id=resource_id,
             request_meta=meta,
             code=exc.code,
         )
