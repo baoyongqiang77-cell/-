@@ -426,3 +426,79 @@ class CoordinateTransformModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
     )
+
+
+class RouteModel(Base):
+    __tablename__ = "routes"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_routes_tenant_id_id"),
+        UniqueConstraint("tenant_id", "route_code", name="uq_routes_tenant_code"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    route_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(1024))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class RouteVersionModel(Base):
+    __tablename__ = "route_versions"
+    __table_args__ = (
+        CheckConstraint(
+            "route_format IN ('DJI_WPML', 'KML', 'GEOJSON', 'PENDING_CONFIRMATION')",
+            name="ck_route_versions_route_format",
+        ),
+        CheckConstraint(
+            "checksum LIKE 'sha256:%'",
+            name="ck_route_versions_checksum",
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_route_versions_tenant_id_id"),
+        UniqueConstraint(
+            "tenant_id",
+            "route_id",
+            "version",
+            name="uq_route_versions_tenant_route_version",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "route_id"],
+            ["routes.tenant_id", "routes.id"],
+            name="fk_route_versions_tenant_route",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    route_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    route_file_uri: Mapped[str] = mapped_column(String(512), nullable=False)
+    route_format: Mapped[str] = mapped_column(String(32), nullable=False)
+    checksum: Mapped[str] = mapped_column(String(128), nullable=False)
+    path_geom_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    asset_bindings: Mapped[list] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'"),
+    )
+    validation_report: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'"),
+    )
+    dji_route_id: Mapped[str | None] = mapped_column(String(128))
+    uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
