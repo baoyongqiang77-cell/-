@@ -32,6 +32,13 @@ from .device_registry import (
     device_payload,
     dock_payload,
 )
+from .gis_assets import (
+    GisAssetRepository,
+    bridge_asset_payload,
+    coordinate_transform_payload,
+    road_asset_payload,
+    slope_asset_payload,
+)
 from .repositories import RequestMeta, U0Repository
 
 
@@ -395,6 +402,170 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
             )
             raise
 
+    @app.get("/api/v1/gis/road-assets", tags=["U1 GIS assets"])
+    def list_road_assets(
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        assets = GisAssetRepository(repo.session)
+        return {
+            "items": [
+                road_asset_payload(item)
+                for item in assets.list_road_assets(context.tenant_id)
+            ]
+        }
+
+    @app.get("/api/v1/gis/road-assets/{asset_id}", tags=["U1 GIS assets"])
+    def get_road_asset(
+        asset_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        assets = GisAssetRepository(repo.session)
+        try:
+            return road_asset_payload(assets.road_asset(context.tenant_id, asset_id))
+        except DomainError as exc:
+            _commit_gis_read_denial(
+                request, repo, actor, context, meta, exc, "road_asset", asset_id
+            )
+            raise
+
+    @app.get("/api/v1/gis/bridge-assets", tags=["U1 GIS assets"])
+    def list_bridge_assets(
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        assets = GisAssetRepository(repo.session)
+        return {
+            "items": [
+                bridge_asset_payload(item)
+                for item in assets.list_bridge_assets(context.tenant_id)
+            ]
+        }
+
+    @app.get("/api/v1/gis/bridge-assets/{asset_id}", tags=["U1 GIS assets"])
+    def get_bridge_asset(
+        asset_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        assets = GisAssetRepository(repo.session)
+        try:
+            return bridge_asset_payload(assets.bridge_asset(context.tenant_id, asset_id))
+        except DomainError as exc:
+            _commit_gis_read_denial(
+                request, repo, actor, context, meta, exc, "bridge_asset", asset_id
+            )
+            raise
+
+    @app.get("/api/v1/gis/slope-assets", tags=["U1 GIS assets"])
+    def list_slope_assets(
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        assets = GisAssetRepository(repo.session)
+        return {
+            "items": [
+                slope_asset_payload(item)
+                for item in assets.list_slope_assets(context.tenant_id)
+            ]
+        }
+
+    @app.get("/api/v1/gis/slope-assets/{asset_id}", tags=["U1 GIS assets"])
+    def get_slope_asset(
+        asset_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        assets = GisAssetRepository(repo.session)
+        try:
+            return slope_asset_payload(assets.slope_asset(context.tenant_id, asset_id))
+        except DomainError as exc:
+            _commit_gis_read_denial(
+                request, repo, actor, context, meta, exc, "slope_asset", asset_id
+            )
+            raise
+
+    @app.get("/api/v1/gis/coordinate-transforms", tags=["U1 GIS assets"])
+    def list_coordinate_transforms(
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        assets = GisAssetRepository(repo.session)
+        return {
+            "items": [
+                coordinate_transform_payload(item)
+                for item in assets.list_coordinate_transforms(context.tenant_id)
+            ]
+        }
+
+    @app.get(
+        "/api/v1/gis/coordinate-transforms/{transform_id}",
+        tags=["U1 GIS assets"],
+    )
+    def get_coordinate_transform(
+        transform_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        assets = GisAssetRepository(repo.session)
+        try:
+            return coordinate_transform_payload(
+                assets.coordinate_transform(context.tenant_id, transform_id)
+            )
+        except DomainError as exc:
+            _commit_gis_read_denial(
+                request,
+                repo,
+                actor,
+                context,
+                meta,
+                exc,
+                "coordinate_transform",
+                transform_id,
+            )
+            raise
+
     @app.post("/api/v1/admin/devices", tags=["U1 device registry"])
     def create_device(
         payload: DeviceCreateRequest,
@@ -626,6 +797,32 @@ def _commit_registry_read_denial(
         tenant_id=context.tenant_id,
         actor=actor.id,
         action="registry_read_denied",
+        resource_type=resource_type,
+        resource_id=resource_id,
+        request_meta=meta,
+        code=error.code,
+    )
+
+
+def _commit_gis_read_denial(
+    request: Request,
+    repo: U0Repository,
+    actor: Actor,
+    context: TenantContext,
+    meta: RequestMeta,
+    error: DomainError,
+    resource_type: str,
+    resource_id: str,
+) -> None:
+    if error.code != "TENANT_404":
+        return
+    repo.session.rollback()
+    error.request_id = meta.request_id
+    U0Repository.commit_denial_audit(
+        request.app.state.session_factory,
+        tenant_id=context.tenant_id,
+        actor=actor.id,
+        action="gis_asset_read_denied",
         resource_type=resource_type,
         resource_id=resource_id,
         request_meta=meta,
