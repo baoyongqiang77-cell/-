@@ -34,6 +34,7 @@ This increment does not implement a real GIS engine, automatic spatial matching,
   - `GET /api/v1/gis/slope-assets`
   - `GET /api/v1/gis/slope-assets/{asset_id}`
   - `GET /api/v1/gis/coordinate-transforms`
+  - `GET /api/v1/gis/coordinate-transforms/{transform_id}`
 - Platform-admin write APIs:
   - `POST /api/v1/admin/gis/road-assets`
   - `PATCH /api/v1/admin/gis/road-assets/{asset_id}`
@@ -54,6 +55,7 @@ This increment does not implement a real GIS engine, automatic spatial matching,
 - `asset_segments`, `event_asset_links`, routes, route versions, missions, approvals, telemetry WebSocket, or media sync.
 - Customer write permissions.
 - External customer GIS REST/database-view integration.
+- Batch or file-based offline GeoJSON import. This increment keeps `geom_json`, `source`, `crs`, and `data_version` as future import metadata fields only.
 - Any claim that L2/L3 localization or production GIS acceptance is complete.
 
 ## Data Model
@@ -114,10 +116,12 @@ Constraints:
 - `(tenant_id, slope_code)` unique.
 - `end_stake >= start_stake`.
 
+CRS values are constrained to `WGS84`, `GCJ02`, `CGCS2000`, and `PENDING_CONFIRMATION`. The registry stores CRS metadata only; it does not execute coordinate conversion.
+
 ### `coordinate_transforms`
 
 - `id`: string primary key, generated as `ctr_<hex>`.
-- `tenant_id`: nullable foreign key to `tenants.id`. `NULL` means platform default configuration; tenant-specific records are scoped to one tenant.
+- `tenant_id`: required foreign key to `tenants.id`, indexed. Platform-default records are owned by the platform operator tenant instead of using `NULL`, so tenant isolation, audit, and idempotency remain explicit.
 - `source_crs`: required text.
 - `target_crs`: required text.
 - `method`: required value: `CONFIG_ONLY`, `AFFINE`, `HELMERT`, or `MANUAL_REVIEW`.
@@ -127,7 +131,7 @@ Constraints:
 - `created_at`, `updated_at`.
 
 Constraints:
-- `(tenant_id, source_crs, target_crs, version)` unique where supported by the database model; SQLite/PostgreSQL migration uses a normal unique constraint with nullable tenant behavior accepted for this increment.
+- `(tenant_id, source_crs, target_crs, version)` unique.
 - `source_crs != target_crs`.
 
 ## Validation
@@ -136,11 +140,13 @@ Service-level validation supplements database constraints because error response
 
 - Empty strings in required text fields return `MISSION_422`.
 - Invalid enum-like values return `MISSION_422`.
+- Invalid CRS values return `GIS_422`.
 - Invalid stake ranges return `GIS_422`.
 - `geom_json` must be a JSON object with a string `type`. Unsupported or missing geometry type returns `GIS_422`.
 - Supported placeholder geometry types are `Point`, `LineString`, `Polygon`, `MultiLineString`, and `MultiPolygon`.
 - Customer-provided `tenant_id`, `status`, `created_at`, or `updated_at` fields are forbidden by strict Pydantic request models and return unified `MISSION_422`.
 - Duplicate tenant-scoped asset codes or ranges return `MISSION_422`.
+- Duplicate tenant-scoped coordinate-transform versions return `MISSION_422`.
 
 ## Access Control
 
