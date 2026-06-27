@@ -245,3 +245,184 @@ class DockModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
     )
+
+
+class RoadAssetModel(Base):
+    __tablename__ = "road_assets"
+    __table_args__ = (
+        CheckConstraint(
+            "direction IN ('UP', 'DOWN', 'BIDIRECTIONAL', 'RAMP', 'UNKNOWN')",
+            name="ck_road_assets_direction",
+        ),
+        CheckConstraint("end_stake >= start_stake", name="ck_road_assets_stake_range"),
+        CheckConstraint(
+            "crs IN ('WGS84', 'GCJ02', 'CGCS2000', 'PENDING_CONFIRMATION')",
+            name="ck_road_assets_crs",
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_road_assets_tenant_id_id"),
+        UniqueConstraint(
+            "tenant_id",
+            "route_code",
+            "direction",
+            "start_stake",
+            "end_stake",
+            name="uq_road_assets_tenant_range",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    route_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    road_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    direction: Mapped[str] = mapped_column(String(32), nullable=False)
+    start_stake: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_stake: Mapped[int] = mapped_column(Integer, nullable=False)
+    geom_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    source: Mapped[str] = mapped_column(
+        String(128), nullable=False, default="MANUAL_IMPORT"
+    )
+    crs: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="PENDING_CONFIRMATION"
+    )
+    data_version: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class BridgeAssetModel(Base):
+    __tablename__ = "bridge_assets"
+    __table_args__ = (
+        CheckConstraint("stake_no >= 0", name="ck_bridge_assets_stake_no"),
+        CheckConstraint(
+            "crs IN ('WGS84', 'GCJ02', 'CGCS2000', 'PENDING_CONFIRMATION')",
+            name="ck_bridge_assets_crs",
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_bridge_assets_tenant_id_id"),
+        UniqueConstraint("tenant_id", "bridge_code", name="uq_bridge_assets_tenant_code"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    bridge_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    bridge_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    route_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    stake_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    geom_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    structure_parts: Mapped[list] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'"),
+    )
+    source: Mapped[str] = mapped_column(
+        String(128), nullable=False, default="MANUAL_IMPORT"
+    )
+    crs: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="PENDING_CONFIRMATION"
+    )
+    data_version: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class SlopeAssetModel(Base):
+    __tablename__ = "slope_assets"
+    __table_args__ = (
+        CheckConstraint(
+            "side IN ('LEFT', 'RIGHT', 'BOTH', 'UNKNOWN')",
+            name="ck_slope_assets_side",
+        ),
+        CheckConstraint("end_stake >= start_stake", name="ck_slope_assets_stake_range"),
+        CheckConstraint(
+            "crs IN ('WGS84', 'GCJ02', 'CGCS2000', 'PENDING_CONFIRMATION')",
+            name="ck_slope_assets_crs",
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_slope_assets_tenant_id_id"),
+        UniqueConstraint("tenant_id", "slope_code", name="uq_slope_assets_tenant_code"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    slope_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    route_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    start_stake: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_stake: Mapped[int] = mapped_column(Integer, nullable=False)
+    side: Mapped[str] = mapped_column(String(32), nullable=False)
+    geom_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    source: Mapped[str] = mapped_column(
+        String(128), nullable=False, default="MANUAL_IMPORT"
+    )
+    crs: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="PENDING_CONFIRMATION"
+    )
+    data_version: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class CoordinateTransformModel(Base):
+    __tablename__ = "coordinate_transforms"
+    __table_args__ = (
+        CheckConstraint(
+            "source_crs IN ('WGS84', 'GCJ02', 'CGCS2000', 'PENDING_CONFIRMATION')",
+            name="ck_coordinate_transforms_source_crs",
+        ),
+        CheckConstraint(
+            "target_crs IN ('WGS84', 'GCJ02', 'CGCS2000', 'PENDING_CONFIRMATION')",
+            name="ck_coordinate_transforms_target_crs",
+        ),
+        CheckConstraint(
+            "source_crs != target_crs",
+            name="ck_coordinate_transforms_crs_pair",
+        ),
+        CheckConstraint(
+            "method IN ('CONFIG_ONLY', 'AFFINE', 'HELMERT', 'MANUAL_REVIEW')",
+            name="ck_coordinate_transforms_method",
+        ),
+        CheckConstraint(
+            "status IN ('ACTIVE', 'DEPRECATED', 'PENDING_CONFIRMATION')",
+            name="ck_coordinate_transforms_status",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "source_crs",
+            "target_crs",
+            "version",
+            name="uq_coordinate_transforms_scope",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    source_crs: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_crs: Mapped[str] = mapped_column(String(32), nullable=False)
+    method: Mapped[str] = mapped_column(String(32), nullable=False)
+    params_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
