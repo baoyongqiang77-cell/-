@@ -34,6 +34,7 @@ from .device_registry import (
 )
 from .gis_assets import (
     GisAssetRepository,
+    GisAssetService,
     bridge_asset_payload,
     coordinate_transform_payload,
     road_asset_payload,
@@ -140,6 +141,144 @@ class DockUpdateRequest(BaseModel):
             raise ValueError("at least one update field is required")
         if "environment_json" in self.model_fields_set and self.environment_json is None:
             raise ValueError("environment_json cannot be null")
+        return self
+
+
+class RoadAssetCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    route_code: str = Field(min_length=1)
+    road_name: str = Field(min_length=1)
+    direction: Literal["UP", "DOWN", "BIDIRECTIONAL", "RAMP", "UNKNOWN"]
+    start_stake: int
+    end_stake: int
+    geom_json: dict
+    source: str = Field(default="MANUAL_IMPORT", min_length=1)
+    crs: str = "PENDING_CONFIRMATION"
+    data_version: str | None = None
+
+
+class RoadAssetUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    route_code: str | None = Field(default=None, min_length=1)
+    road_name: str | None = Field(default=None, min_length=1)
+    direction: Literal["UP", "DOWN", "BIDIRECTIONAL", "RAMP", "UNKNOWN"] | None = None
+    start_stake: int | None = None
+    end_stake: int | None = None
+    geom_json: dict | None = None
+    source: str | None = Field(default=None, min_length=1)
+    crs: str | None = None
+    data_version: str | None = None
+
+    @model_validator(mode="after")
+    def validate_update(self):
+        if not self.model_fields_set:
+            raise ValueError("at least one update field is required")
+        if "geom_json" in self.model_fields_set and self.geom_json is None:
+            raise ValueError("geom_json cannot be null")
+        return self
+
+
+class BridgeAssetCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bridge_code: str = Field(min_length=1)
+    bridge_name: str = Field(min_length=1)
+    route_code: str = Field(min_length=1)
+    stake_no: int
+    geom_json: dict
+    structure_parts: list = Field(default_factory=list)
+    source: str = Field(default="MANUAL_IMPORT", min_length=1)
+    crs: str = "PENDING_CONFIRMATION"
+    data_version: str | None = None
+
+
+class BridgeAssetUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bridge_code: str | None = Field(default=None, min_length=1)
+    bridge_name: str | None = Field(default=None, min_length=1)
+    route_code: str | None = Field(default=None, min_length=1)
+    stake_no: int | None = None
+    geom_json: dict | None = None
+    structure_parts: list | None = None
+    source: str | None = Field(default=None, min_length=1)
+    crs: str | None = None
+    data_version: str | None = None
+
+    @model_validator(mode="after")
+    def validate_update(self):
+        if not self.model_fields_set:
+            raise ValueError("at least one update field is required")
+        if "geom_json" in self.model_fields_set and self.geom_json is None:
+            raise ValueError("geom_json cannot be null")
+        return self
+
+
+class SlopeAssetCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slope_code: str = Field(min_length=1)
+    route_code: str = Field(min_length=1)
+    start_stake: int
+    end_stake: int
+    side: Literal["LEFT", "RIGHT", "BOTH", "UNKNOWN"]
+    geom_json: dict
+    source: str = Field(default="MANUAL_IMPORT", min_length=1)
+    crs: str = "PENDING_CONFIRMATION"
+    data_version: str | None = None
+
+
+class SlopeAssetUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slope_code: str | None = Field(default=None, min_length=1)
+    route_code: str | None = Field(default=None, min_length=1)
+    start_stake: int | None = None
+    end_stake: int | None = None
+    side: Literal["LEFT", "RIGHT", "BOTH", "UNKNOWN"] | None = None
+    geom_json: dict | None = None
+    source: str | None = Field(default=None, min_length=1)
+    crs: str | None = None
+    data_version: str | None = None
+
+    @model_validator(mode="after")
+    def validate_update(self):
+        if not self.model_fields_set:
+            raise ValueError("at least one update field is required")
+        if "geom_json" in self.model_fields_set and self.geom_json is None:
+            raise ValueError("geom_json cannot be null")
+        return self
+
+
+class CoordinateTransformCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_crs: str
+    target_crs: str
+    method: str
+    params_json: dict
+    version: str = Field(min_length=1)
+    status: str
+
+
+class CoordinateTransformUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_crs: str | None = None
+    target_crs: str | None = None
+    method: str | None = None
+    params_json: dict | None = None
+    version: str | None = Field(default=None, min_length=1)
+    status: str | None = None
+
+    @model_validator(mode="after")
+    def validate_update(self):
+        if not self.model_fields_set:
+            raise ValueError("at least one update field is required")
+        if "params_json" in self.model_fields_set and self.params_json is None:
+            raise ValueError("params_json cannot be null")
         return self
 
 
@@ -566,6 +705,249 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
             )
             raise
 
+    @app.post("/api/v1/admin/gis/road-assets", tags=["U1 GIS assets"])
+    def create_road_asset(
+        payload: RoadAssetCreateRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _gis_write_context(request, repo, actor, x_tenant_id, meta)
+        service = GisAssetService(repo.session)
+        return _run_gis_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "road_asset",
+            None,
+            lambda: service.create_road_asset(
+                actor.id,
+                context.tenant_id,
+                payload.model_dump(),
+                idempotency_key,
+                meta,
+            ),
+        )
+
+    @app.patch("/api/v1/admin/gis/road-assets/{asset_id}", tags=["U1 GIS assets"])
+    def update_road_asset(
+        asset_id: str,
+        payload: RoadAssetUpdateRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _gis_write_context(request, repo, actor, x_tenant_id, meta)
+        service = GisAssetService(repo.session)
+        return _run_gis_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "road_asset",
+            asset_id,
+            lambda: service.update_road_asset(
+                actor.id,
+                context.tenant_id,
+                asset_id,
+                payload.model_dump(exclude_unset=True),
+                idempotency_key,
+                meta,
+            ),
+        )
+
+    @app.post("/api/v1/admin/gis/bridge-assets", tags=["U1 GIS assets"])
+    def create_bridge_asset(
+        payload: BridgeAssetCreateRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _gis_write_context(request, repo, actor, x_tenant_id, meta)
+        service = GisAssetService(repo.session)
+        return _run_gis_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "bridge_asset",
+            None,
+            lambda: service.create_bridge_asset(
+                actor.id,
+                context.tenant_id,
+                payload.model_dump(),
+                idempotency_key,
+                meta,
+            ),
+        )
+
+    @app.patch("/api/v1/admin/gis/bridge-assets/{asset_id}", tags=["U1 GIS assets"])
+    def update_bridge_asset(
+        asset_id: str,
+        payload: BridgeAssetUpdateRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _gis_write_context(request, repo, actor, x_tenant_id, meta)
+        service = GisAssetService(repo.session)
+        return _run_gis_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "bridge_asset",
+            asset_id,
+            lambda: service.update_bridge_asset(
+                actor.id,
+                context.tenant_id,
+                asset_id,
+                payload.model_dump(exclude_unset=True),
+                idempotency_key,
+                meta,
+            ),
+        )
+
+    @app.post("/api/v1/admin/gis/slope-assets", tags=["U1 GIS assets"])
+    def create_slope_asset(
+        payload: SlopeAssetCreateRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _gis_write_context(request, repo, actor, x_tenant_id, meta)
+        service = GisAssetService(repo.session)
+        return _run_gis_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "slope_asset",
+            None,
+            lambda: service.create_slope_asset(
+                actor.id,
+                context.tenant_id,
+                payload.model_dump(),
+                idempotency_key,
+                meta,
+            ),
+        )
+
+    @app.patch("/api/v1/admin/gis/slope-assets/{asset_id}", tags=["U1 GIS assets"])
+    def update_slope_asset(
+        asset_id: str,
+        payload: SlopeAssetUpdateRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _gis_write_context(request, repo, actor, x_tenant_id, meta)
+        service = GisAssetService(repo.session)
+        return _run_gis_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "slope_asset",
+            asset_id,
+            lambda: service.update_slope_asset(
+                actor.id,
+                context.tenant_id,
+                asset_id,
+                payload.model_dump(exclude_unset=True),
+                idempotency_key,
+                meta,
+            ),
+        )
+
+    @app.post("/api/v1/admin/gis/coordinate-transforms", tags=["U1 GIS assets"])
+    def create_coordinate_transform(
+        payload: CoordinateTransformCreateRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _gis_write_context(request, repo, actor, x_tenant_id, meta)
+        service = GisAssetService(repo.session)
+        return _run_gis_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "coordinate_transform",
+            None,
+            lambda: service.create_coordinate_transform(
+                actor.id,
+                context.tenant_id,
+                payload.model_dump(),
+                idempotency_key,
+                meta,
+            ),
+        )
+
+    @app.patch(
+        "/api/v1/admin/gis/coordinate-transforms/{transform_id}",
+        tags=["U1 GIS assets"],
+    )
+    def update_coordinate_transform(
+        transform_id: str,
+        payload: CoordinateTransformUpdateRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _gis_write_context(request, repo, actor, x_tenant_id, meta)
+        service = GisAssetService(repo.session)
+        return _run_gis_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "coordinate_transform",
+            transform_id,
+            lambda: service.update_coordinate_transform(
+                actor.id,
+                context.tenant_id,
+                transform_id,
+                payload.model_dump(exclude_unset=True),
+                idempotency_key,
+                meta,
+            ),
+        )
+
     @app.post("/api/v1/admin/devices", tags=["U1 device registry"])
     def create_device(
         payload: DeviceCreateRequest,
@@ -857,6 +1239,33 @@ def _registry_write_context(
     return context
 
 
+def _gis_write_context(
+    request: Request,
+    repo: U0Repository,
+    actor: Actor,
+    target_tenant_id: str | None,
+    meta: RequestMeta,
+) -> TenantContext:
+    context = _resolve_context(request, repo, actor, target_tenant_id, meta)
+    _require_roles(
+        request,
+        repo,
+        actor,
+        {"PLATFORM_ADMIN"},
+        meta,
+        action="gis_asset_write_denied",
+    )
+    _require_feature(
+        request,
+        repo,
+        actor,
+        context,
+        FeatureCode.FLIGHT_CONTROL,
+        meta,
+    )
+    return context
+
+
 def _run_registry_write(
     request: Request,
     repo: U0Repository,
@@ -879,6 +1288,36 @@ def _run_registry_write(
             tenant_id=context.tenant_id,
             actor=actor.id,
             action="registry_write_denied",
+            resource_type=resource_type,
+            resource_id=resource_id,
+            request_meta=meta,
+            code=exc.code,
+        )
+        raise
+
+
+def _run_gis_write(
+    request: Request,
+    repo: U0Repository,
+    actor: Actor,
+    context: TenantContext,
+    meta: RequestMeta,
+    resource_type: str,
+    resource_id: str | None,
+    operation: Callable[[], dict],
+) -> dict:
+    try:
+        return operation()
+    except DomainError as exc:
+        if exc.code not in {"IDEMP_409", "MISSION_422", "GIS_422", "TENANT_404"}:
+            raise
+        repo.session.rollback()
+        exc.request_id = meta.request_id
+        U0Repository.commit_denial_audit(
+            request.app.state.session_factory,
+            tenant_id=context.tenant_id,
+            actor=actor.id,
+            action="gis_asset_write_denied",
             resource_type=resource_type,
             resource_id=resource_id,
             request_meta=meta,
