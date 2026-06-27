@@ -58,6 +58,7 @@ EXPECTED_TABLES = {
     "coordinate_transforms",
     "routes",
     "route_versions",
+    "missions",
 }
 
 
