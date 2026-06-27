@@ -20,6 +20,7 @@ from app.models import (
     Base,
     DeviceModel,
     DockModel,
+    MissionModel,
     RoadAssetModel,
     RouteModel,
     RouteVersionModel,
@@ -31,6 +32,7 @@ from drone_inspection.errors import DomainError
 class MissionModelTests(unittest.TestCase):
     def test_metadata_contains_missions_table(self):
         self.assertIn("missions", Base.metadata.tables)
+        self.assertIn("mission_approvals", Base.metadata.tables)
 
     def test_mission_model_registers_required_constraints(self):
         models = importlib.import_module("app.models")
@@ -40,6 +42,15 @@ class MissionModelTests(unittest.TestCase):
         self.assertIn("fk_missions_tenant_route", constraints)
         self.assertIn("fk_missions_tenant_route_version", constraints)
         self.assertIn("fk_missions_tenant_device", constraints)
+
+    def test_mission_approval_model_registers_required_constraints(self):
+        models = importlib.import_module("app.models")
+        constraints = {
+            item.name for item in models.MissionApprovalModel.__table__.constraints
+        }
+
+        self.assertIn("ck_mission_approvals_status", constraints)
+        self.assertIn("fk_mission_approvals_tenant_mission", constraints)
 
     def test_alembic_mission_creation_round_trip_sqlite(self):
         with TemporaryDirectory() as temp_dir:
@@ -51,13 +62,19 @@ class MissionModelTests(unittest.TestCase):
             engine = build_session_factory(database_url).kw["bind"]
             try:
                 self.assertIn("missions", set(inspect(engine).get_table_names()))
+                self.assertIn(
+                    "mission_approvals", set(inspect(engine).get_table_names())
+                )
             finally:
                 engine.dispose()
 
-            command.downgrade(config, "20260627_0004")
+            command.downgrade(config, "20260627_0005")
             engine = build_session_factory(database_url).kw["bind"]
             try:
-                self.assertNotIn("missions", set(inspect(engine).get_table_names()))
+                self.assertIn("missions", set(inspect(engine).get_table_names()))
+                self.assertNotIn(
+                    "mission_approvals", set(inspect(engine).get_table_names())
+                )
             finally:
                 engine.dispose()
 
@@ -120,6 +137,21 @@ class MissionServiceTests(unittest.TestCase):
                         path_geom_json={"type": "LineString", "coordinates": []},
                     ),
                 ]
+            )
+            session.commit()
+            session.add(
+                MissionModel(
+                    id="ms_a",
+                    tenant_id="t_customer_001",
+                    route_id="route_a",
+                    route_version_id="rv_a",
+                    device_id="dev_dock_a",
+                    dock_id="dock_a",
+                    status="DRAFT",
+                    schedule_time=datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc),
+                    inspection_targets=[{"asset_type": "road", "asset_id": "road_a"}],
+                    media_policy={"video": True},
+                )
             )
             session.commit()
 
@@ -212,6 +244,132 @@ class MissionServiceTests(unittest.TestCase):
                 )
             )
         self.assertEqual(audit.action, "mission_created")
+
+    def test_submits_approval_once_and_moves_mission_to_pending(self):
+        service_module = importlib.import_module("app.mission_management")
+        with self.session_factory() as session:
+            service = service_module.MissionManagementService(session)
+            first = service.submit_approval(
+                "u_customer_a_operator",
+                "t_customer_001",
+                "ms_a",
+                {
+                    "external_system": "BUILT_IN",
+                    "external_id": "manual-001",
+                    "callback_payload": {"mode": "manual"},
+                    "comment": "submit for airspace review",
+                },
+                "approval-submit",
+                RequestMeta("req_approval_submit", "127.0.0.1"),
+            )
+            replay = service.submit_approval(
+                "u_customer_a_operator",
+                "t_customer_001",
+                "ms_a",
+                {
+                    "external_system": "BUILT_IN",
+                    "external_id": "manual-001",
+                    "callback_payload": {"mode": "manual"},
+                    "comment": "submit for airspace review",
+                },
+                "approval-submit",
+                RequestMeta("req_approval_submit", "127.0.0.1"),
+            )
+            mission = session.get(MissionModel, "ms_a")
+
+        self.assertEqual(replay, first)
+        self.assertEqual(first["status"], "PENDING_APPROVAL")
+        self.assertEqual(first["mission_status"], "PENDING_APPROVAL")
+        self.assertEqual(mission.status, "PENDING_APPROVAL")
+
+    def test_approves_and_rejects_only_pending_missions(self):
+        service_module = importlib.import_module("app.mission_management")
+        with self.session_factory() as session:
+            service = service_module.MissionManagementService(session)
+            submitted = service.submit_approval(
+                "u_customer_a_operator",
+                "t_customer_001",
+                "ms_a",
+                {"external_system": "BUILT_IN"},
+                "approval-submit-approve",
+                RequestMeta("req_submit_approve", "127.0.0.1"),
+            )
+            approved = service.decide_approval(
+                "u_customer_a_approver",
+                "t_customer_001",
+                "ms_a",
+                submitted["id"],
+                "APPROVED",
+                {"comment": "approved"},
+                "approval-approve",
+                RequestMeta("req_approve", "127.0.0.1"),
+            )
+            mission = session.get(MissionModel, "ms_a")
+            with self.assertRaises(DomainError) as raised:
+                service.decide_approval(
+                    "u_customer_a_approver",
+                    "t_customer_001",
+                    "ms_a",
+                    submitted["id"],
+                    "REJECTED",
+                    {"comment": "too late"},
+                    "approval-reject-after-approve",
+                    RequestMeta("req_reject_after_approve", "127.0.0.1"),
+                )
+
+        self.assertEqual(approved["status"], "APPROVED")
+        self.assertEqual(approved["mission_status"], "APPROVED")
+        self.assertEqual(mission.status, "APPROVED")
+        self.assertEqual(raised.exception.code, "STATE_409")
+
+    def test_approval_cross_tenant_mission_returns_tenant_404(self):
+        service_module = importlib.import_module("app.mission_management")
+        with self.session_factory() as session:
+            service = service_module.MissionManagementService(session)
+            with self.assertRaises(DomainError) as raised:
+                service.submit_approval(
+                    "u_customer_b_operator",
+                    "t_customer_002",
+                    "ms_a",
+                    {"external_system": "BUILT_IN"},
+                    "approval-cross-tenant",
+                    RequestMeta("req_approval_cross", "127.0.0.1"),
+                )
+
+        self.assertEqual(raised.exception.code, "TENANT_404")
+
+    def test_approval_decision_writes_audit(self):
+        service_module = importlib.import_module("app.mission_management")
+        with self.session_factory() as session:
+            service = service_module.MissionManagementService(session)
+            submitted = service.submit_approval(
+                "u_customer_a_operator",
+                "t_customer_001",
+                "ms_a",
+                {"external_system": "BUILT_IN"},
+                "approval-submit-audit",
+                RequestMeta("req_submit_audit", "127.0.0.1"),
+            )
+            service.decide_approval(
+                "u_customer_a_approver",
+                "t_customer_001",
+                "ms_a",
+                submitted["id"],
+                "REJECTED",
+                {"comment": "weather window missed"},
+                "approval-reject-audit",
+                RequestMeta("req_reject_audit", "127.0.0.1"),
+            )
+
+        with self.session_factory() as session:
+            audit = session.scalar(
+                select(AuditLogModel).where(
+                    AuditLogModel.request_id == "req_reject_audit"
+                )
+            )
+        self.assertEqual(audit.action, "mission_rejected")
+        self.assertEqual(audit.before_status, "PENDING_APPROVAL")
+        self.assertEqual(audit.after_status, "REJECTED")
 
 
 if __name__ == "__main__":

@@ -97,6 +97,19 @@
 | 空媒体策略返回 `MISSION_422`，跨租户设备返回 `TENANT_404` | PASS |
 | U1-F05 API 与持久化聚焦测试共 13 项 | PASS |
 
+### U1-F06 Mission Approval
+
+| Check | Result |
+| --- | --- |
+| `mission_approvals` table, tenant-scoped mission FK, fixed approval statuses | PASS |
+| Submit approval moves mission `DRAFT -> PENDING_APPROVAL` and writes audit | PASS |
+| Built-in approve/reject moves mission `PENDING_APPROVAL -> APPROVED/REJECTED` and writes audit | PASS |
+| Cross-tenant approval access returns `TENANT_404` without revealing resource existence | PASS |
+| Approval write APIs require `Idempotency-Key` and reject conflicting replays with `IDEMP_409` | PASS |
+| U1-F05/F06 API and persistence focused tests total 23 cases | PASS |
+
+U1-F06 only implements built-in approval persistence and manual trace fields for pending OA/airspace integration. It does not call a real OA or airspace system, does not upload routes, does not dispatch to DJI, and does not write `flight_events`.
+
 ## 自动化命令
 
 ```powershell
@@ -118,10 +131,11 @@
 - 真实 DJI 航线上传、任务、审批、遥测 WebSocket 和 `flight_events` 持久化属于后续 U1 增量。
 - U1-F04 仅保存航线版本文件 URI、checksum、路径几何和资产绑定，不执行真实 DJI 航线格式转换、上传、飞行安全校验或设备侧回执确认。
 - U1-F05 仅创建 `DRAFT` 任务，不提交审批、不调用 OA/空域系统、不下发 DJI、不写 `flight_events`、不声明天气/空域真实校验已完成。
+- U1-F06 仅实现内置审批流和人工/外部审批追踪字段，不调用真实 OA/空域系统、不下发 DJI、不写 `flight_events`、不声明生产审批联调完成。
 - 真实 GIS 数据来源、权威坐标系、更新频率、桩号映射、客户 GIS REST/数据库视图对接和离线 GeoJSON 批量导入仍待确认。
 - U1-F03 仅保存 `geom_json` 和 CRS 元数据，不执行真实 PostGIS 空间计算、自动坐标转换、最近资产匹配或 L2/L3 精确定位。
 - 云端 PostgreSQL 迁移实测已完成；远端通过本机确认的 ED25519 SSH 主机指纹后接入，Docker Hub 直连不可达时使用国内镜像源预拉取同一 `postgres:16-alpine` 镜像。
 
 ## 验收结论
 
-U1-F01 网关契约、开发模拟器和状态机规则级验收通过；U1-F02 设备与机巢台账、U1-F03 GIS 最小资产台账、U1-F04 航线管理、U1-F05 任务创建的本地自动化验收通过，U1-F02/U1-F03 云端 PostgreSQL 迁移 `upgrade/downgrade/upgrade` 实测通过。当前结果不代表真实 DJI 设备、DJI Cloud API、配套无人机/载荷型号、真实审批、真实航线上传、真实飞行、生产网络、真实 GIS 数据源或精确空间定位验收通过。
+U1-F01 网关契约、开发模拟器和状态机规则级验收通过；U1-F02 设备与机巢台账、U1-F03 GIS 最小资产台账、U1-F04 航线管理、U1-F05 任务创建、U1-F06 内置任务审批的本地自动化验收通过，U1-F02/U1-F03 云端 PostgreSQL 迁移 `upgrade/downgrade/upgrade` 实测通过。当前结果不代表真实 DJI 设备、DJI Cloud API、配套无人机/载荷型号、真实 OA/空域审批、真实航线上传、真实飞行、生产网络、真实 GIS 数据源或精确空间定位验收通过。

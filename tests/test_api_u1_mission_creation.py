@@ -191,6 +191,119 @@ class MissionCreationApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["code"], "IDEMP_409")
 
+    def test_customer_submits_and_approves_mission_once(self):
+        submit_headers = {
+            "Authorization": "Bearer demo-customer-a",
+            "Idempotency-Key": "submit-approval-a",
+        }
+        submit = self.client.post(
+            "/api/v1/missions/ms_a/submit-approval",
+            json={
+                "external_system": "BUILT_IN",
+                "external_id": "manual-001",
+                "callback_payload": {"mode": "manual"},
+                "comment": "submit",
+            },
+            headers=submit_headers,
+        )
+        replay = self.client.post(
+            "/api/v1/missions/ms_a/submit-approval",
+            json={
+                "external_system": "BUILT_IN",
+                "external_id": "manual-001",
+                "callback_payload": {"mode": "manual"},
+                "comment": "submit",
+            },
+            headers=submit_headers,
+        )
+        approve = self.client.post(
+            f"/api/v1/missions/ms_a/approvals/{submit.json()['id']}/approve",
+            json={"comment": "approved"},
+            headers={
+                "Authorization": "Bearer demo-customer-a",
+                "Idempotency-Key": "approve-approval-a",
+            },
+        )
+
+        self.assertEqual(submit.status_code, 200)
+        self.assertEqual(replay.json(), submit.json())
+        self.assertEqual(submit.json()["status"], "PENDING_APPROVAL")
+        self.assertEqual(approve.status_code, 200)
+        self.assertEqual(approve.json()["status"], "APPROVED")
+        self.assertEqual(approve.json()["mission_status"], "APPROVED")
+
+    def test_customer_rejects_pending_mission(self):
+        submit = self.client.post(
+            "/api/v1/missions/ms_a/submit-approval",
+            json={"external_system": "BUILT_IN"},
+            headers={
+                "Authorization": "Bearer demo-customer-a",
+                "Idempotency-Key": "submit-approval-reject",
+            },
+        )
+        reject = self.client.post(
+            f"/api/v1/missions/ms_a/approvals/{submit.json()['id']}/reject",
+            json={
+                "external_status": "REJECTED",
+                "callback_payload": {"source": "manual"},
+                "comment": "weather window missed",
+            },
+            headers={
+                "Authorization": "Bearer demo-customer-a",
+                "Idempotency-Key": "reject-approval-a",
+            },
+        )
+
+        self.assertEqual(reject.status_code, 200)
+        self.assertEqual(reject.json()["status"], "REJECTED")
+        self.assertEqual(reject.json()["mission_status"], "REJECTED")
+
+    def test_approval_submit_requires_idempotency_key(self):
+        response = self.client.post(
+            "/api/v1/missions/ms_a/submit-approval",
+            json={"external_system": "BUILT_IN"},
+            headers={"Authorization": "Bearer demo-customer-a"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "IDEMP_409")
+
+    def test_approval_requires_flight_control_entitlement(self):
+        with self.session_factory() as session:
+            session.execute(
+                delete(TenantFeatureEntitlementModel).where(
+                    TenantFeatureEntitlementModel.tenant_id == "t_customer_001",
+                    TenantFeatureEntitlementModel.feature_code == "FLIGHT_CONTROL",
+                )
+            )
+            session.commit()
+
+        response = self.client.post(
+            "/api/v1/missions/ms_a/submit-approval",
+            json={"external_system": "BUILT_IN"},
+            headers={
+                "Authorization": "Bearer demo-customer-a",
+                "Idempotency-Key": "approval-no-feature",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["code"], "FEATURE_403")
+
+    def test_cross_tenant_approval_does_not_reveal_mission(self):
+        response = self.client.post(
+            "/api/v1/missions/ms_a/submit-approval",
+            json={"external_system": "BUILT_IN"},
+            headers={
+                "Authorization": "Bearer demo-customer-b",
+                "Idempotency-Key": "approval-cross-tenant",
+                "X-Request-Id": "req_approval_cross_tenant",
+            },
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "TENANT_404")
+
     def test_forbidden_server_managed_fields_return_mission_422(self):
         payload = self._payload()
         payload["tenant_id"] = "t_customer_002"
@@ -213,6 +326,13 @@ class MissionCreationApiTests(unittest.TestCase):
 
         self.assertIn("/api/v1/missions", paths)
         self.assertIn("/api/v1/missions/{mission_id}", paths)
+        self.assertIn("/api/v1/missions/{mission_id}/submit-approval", paths)
+        self.assertIn(
+            "/api/v1/missions/{mission_id}/approvals/{approval_id}/approve", paths
+        )
+        self.assertIn(
+            "/api/v1/missions/{mission_id}/approvals/{approval_id}/reject", paths
+        )
 
 
 if __name__ == "__main__":

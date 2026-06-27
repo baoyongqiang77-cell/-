@@ -74,7 +74,7 @@ ERROR_STATUS_CODES = {
 }
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-EXPECTED_DATABASE_REVISION = "20260627_0005"
+EXPECTED_DATABASE_REVISION = "20260627_0006"
 
 
 class FeatureEntitlementRequest(BaseModel):
@@ -344,6 +344,16 @@ class MissionCreateRequest(BaseModel):
     schedule_time: datetime
     inspection_targets: list[MissionTargetRequest]
     media_policy: dict
+
+
+class MissionApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_system: Literal["BUILT_IN", "OA", "AIRSPACE", "MANUAL"] | None = None
+    external_id: str | None = None
+    external_status: str | None = None
+    callback_payload: dict = Field(default_factory=dict)
+    comment: str | None = None
 
 
 def create_app(database_url_override: str | None = None) -> FastAPI:
@@ -1256,6 +1266,114 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
             ),
         )
 
+    @app.post("/api/v1/missions/{mission_id}/submit-approval", tags=["U1 missions"])
+    def submit_mission_approval(
+        mission_id: str,
+        payload: MissionApprovalRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        service = MissionManagementService(repo.session)
+        return _run_mission_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "mission",
+            mission_id,
+            lambda: service.submit_approval(
+                actor.id,
+                context.tenant_id,
+                mission_id,
+                payload.model_dump(),
+                idempotency_key,
+                meta,
+            ),
+        )
+
+    @app.post(
+        "/api/v1/missions/{mission_id}/approvals/{approval_id}/approve",
+        tags=["U1 missions"],
+    )
+    def approve_mission(
+        mission_id: str,
+        approval_id: str,
+        payload: MissionApprovalRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        service = MissionManagementService(repo.session)
+        return _run_mission_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "mission_approval",
+            approval_id,
+            lambda: service.decide_approval(
+                actor.id,
+                context.tenant_id,
+                mission_id,
+                approval_id,
+                "APPROVED",
+                payload.model_dump(),
+                idempotency_key,
+                meta,
+            ),
+        )
+
+    @app.post(
+        "/api/v1/missions/{mission_id}/approvals/{approval_id}/reject",
+        tags=["U1 missions"],
+    )
+    def reject_mission(
+        mission_id: str,
+        approval_id: str,
+        payload: MissionApprovalRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        service = MissionManagementService(repo.session)
+        return _run_mission_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "mission_approval",
+            approval_id,
+            lambda: service.decide_approval(
+                actor.id,
+                context.tenant_id,
+                mission_id,
+                approval_id,
+                "REJECTED",
+                payload.model_dump(),
+                idempotency_key,
+                meta,
+            ),
+        )
+
     @app.post("/api/v1/admin/devices", tags=["U1 device registry"])
     def create_device(
         payload: DeviceCreateRequest,
@@ -1696,7 +1814,13 @@ def _run_gis_write(
     try:
         return operation()
     except DomainError as exc:
-        if exc.code not in {"IDEMP_409", "MISSION_422", "GIS_422", "TENANT_404"}:
+        if exc.code not in {
+            "IDEMP_409",
+            "MISSION_422",
+            "GIS_422",
+            "TENANT_404",
+            "STATE_409",
+        }:
             raise
         repo.session.rollback()
         exc.request_id = meta.request_id
