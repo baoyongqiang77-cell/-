@@ -40,6 +40,11 @@ from .gis_assets import (
     road_asset_payload,
     slope_asset_payload,
 )
+from .mission_management import (
+    MissionManagementService,
+    MissionRepository,
+    mission_payload,
+)
 from .repositories import RequestMeta, U0Repository
 from .route_management import (
     RouteManagementService,
@@ -69,7 +74,7 @@ ERROR_STATUS_CODES = {
 }
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-EXPECTED_DATABASE_REVISION = "20260627_0004"
+EXPECTED_DATABASE_REVISION = "20260627_0005"
 
 
 class FeatureEntitlementRequest(BaseModel):
@@ -322,6 +327,23 @@ class RouteVersionCreateRequest(BaseModel):
     validation_report: dict = Field(default_factory=dict)
     dji_route_id: str | None = None
     uploaded_at: datetime | None = None
+
+
+class MissionTargetRequest(BaseModel):
+    asset_type: Literal["road", "bridge", "slope"]
+    asset_id: str = Field(min_length=1)
+
+
+class MissionCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    route_id: str = Field(min_length=1)
+    route_version_id: str = Field(min_length=1)
+    device_id: str = Field(min_length=1)
+    dock_id: str | None = None
+    schedule_time: datetime
+    inspection_targets: list[MissionTargetRequest]
+    media_policy: dict
 
 
 def create_app(database_url_override: str | None = None) -> FastAPI:
@@ -1166,6 +1188,74 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
             ),
         )
 
+    @app.get("/api/v1/missions", tags=["U1 missions"])
+    def list_missions(
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        missions = MissionRepository(repo.session)
+        return {
+            "items": [
+                mission_payload(item)
+                for item in missions.list_missions(context.tenant_id)
+            ]
+        }
+
+    @app.get("/api/v1/missions/{mission_id}", tags=["U1 missions"])
+    def get_mission(
+        mission_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        missions = MissionRepository(repo.session)
+        try:
+            return mission_payload(missions.mission(context.tenant_id, mission_id))
+        except DomainError as exc:
+            _commit_mission_read_denial(
+                request, repo, actor, context, meta, exc, "mission", mission_id
+            )
+            raise
+
+    @app.post("/api/v1/missions", tags=["U1 missions"])
+    def create_mission(
+        payload: MissionCreateRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        service = MissionManagementService(repo.session)
+        return _run_mission_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "mission",
+            None,
+            lambda: service.create_mission(
+                actor.id,
+                context.tenant_id,
+                payload.model_dump(),
+                idempotency_key,
+                meta,
+            ),
+        )
+
     @app.post("/api/v1/admin/devices", tags=["U1 device registry"])
     def create_device(
         payload: DeviceCreateRequest,
@@ -1456,6 +1546,32 @@ def _commit_route_read_denial(
     )
 
 
+def _commit_mission_read_denial(
+    request: Request,
+    repo: U0Repository,
+    actor: Actor,
+    context: TenantContext,
+    meta: RequestMeta,
+    error: DomainError,
+    resource_type: str,
+    resource_id: str,
+) -> None:
+    if error.code != "TENANT_404":
+        return
+    repo.session.rollback()
+    error.request_id = meta.request_id
+    U0Repository.commit_denial_audit(
+        request.app.state.session_factory,
+        tenant_id=context.tenant_id,
+        actor=actor.id,
+        action="mission_read_denied",
+        resource_type=resource_type,
+        resource_id=resource_id,
+        request_meta=meta,
+        code=error.code,
+    )
+
+
 def _registry_write_context(
     request: Request,
     repo: U0Repository,
@@ -1619,6 +1735,36 @@ def _run_route_write(
             tenant_id=context.tenant_id,
             actor=actor.id,
             action="route_write_denied",
+            resource_type=resource_type,
+            resource_id=resource_id,
+            request_meta=meta,
+            code=exc.code,
+        )
+        raise
+
+
+def _run_mission_write(
+    request: Request,
+    repo: U0Repository,
+    actor: Actor,
+    context: TenantContext,
+    meta: RequestMeta,
+    resource_type: str,
+    resource_id: str | None,
+    operation: Callable[[], dict],
+) -> dict:
+    try:
+        return operation()
+    except DomainError as exc:
+        if exc.code not in {"IDEMP_409", "MISSION_422", "GIS_422", "TENANT_404"}:
+            raise
+        repo.session.rollback()
+        exc.request_id = meta.request_id
+        U0Repository.commit_denial_audit(
+            request.app.state.session_factory,
+            tenant_id=context.tenant_id,
+            actor=actor.id,
+            action="mission_write_denied",
             resource_type=resource_type,
             resource_id=resource_id,
             request_meta=meta,

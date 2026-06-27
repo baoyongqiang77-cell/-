@@ -14,6 +14,7 @@
 - U1-F03 道路、桥梁、边坡和坐标转换配置的 GIS 最小资产台账。
 - GIS 资产的租户隔离查询、平台管理员写入、幂等、审计和 `GIS_422` 校验边界。
 - U1-F04 航线主档、航线版本、版本资产绑定和最小路径几何校验。
+- U1-F05 飞行任务创建、`DRAFT` 初始状态、同租户设备/航线/资产校验和媒体策略校验。
 
 ## 自动化用例
 
@@ -83,6 +84,19 @@
 | 非 `LineString` 路径几何返回 `GIS_422`，非法 checksum 和重复版本返回 `MISSION_422` | PASS |
 | U1-F04 API 与持久化聚焦测试共 18 项 | PASS |
 
+### U1-F05 任务创建
+
+| 用例 | 结果 |
+| --- | --- |
+| `missions` 迁移 upgrade/downgrade | PASS |
+| 客户租户可在本租户 `FLIGHT_CONTROL` 授权下创建 `DRAFT` 任务 | PASS |
+| 任务创建校验同租户航线、航线版本、设备、机巢和巡检资产 | PASS |
+| 任务列表和详情始终按当前服务租户过滤，跨租户详情返回 `TENANT_404` 并审计 | PASS |
+| 写请求必须携带 `Idempotency-Key`，重复请求重放原结果 | PASS |
+| 请求体禁止覆盖 `tenant_id/status` 等服务端管理字段 | PASS |
+| 空媒体策略返回 `MISSION_422`，跨租户设备返回 `TENANT_404` | PASS |
+| U1-F05 API 与持久化聚焦测试共 13 项 | PASS |
+
 ## 自动化命令
 
 ```powershell
@@ -90,6 +104,7 @@
 & '.\.venv\Scripts\python.exe' -m unittest tests.test_api_u1_device_registry tests.test_u1_device_registry_persistence -v
 & '.\.venv\Scripts\python.exe' -m unittest tests.test_u1_gis_assets_persistence tests.test_api_u1_gis_assets -v
 & '.\.venv\Scripts\python.exe' -m unittest tests.test_u1_route_management_persistence tests.test_api_u1_route_management -v
+& '.\.venv\Scripts\python.exe' -m unittest tests.test_u1_mission_creation_persistence tests.test_api_u1_mission_creation -v
 & '.\.venv\Scripts\python.exe' -m unittest discover -s tests -v
 & '.\.venv\Scripts\python.exe' -m compileall -q src apps/api/app
 # 云端：U0_POSTGRES_TEST_PORT=55433 ./scripts/test_postgres_migrations.sh
@@ -102,10 +117,11 @@
 - 模拟器仅作为 M1 开发证据，不能满足真实飞行或生产验收。
 - 真实 DJI 航线上传、任务、审批、遥测 WebSocket 和 `flight_events` 持久化属于后续 U1 增量。
 - U1-F04 仅保存航线版本文件 URI、checksum、路径几何和资产绑定，不执行真实 DJI 航线格式转换、上传、飞行安全校验或设备侧回执确认。
+- U1-F05 仅创建 `DRAFT` 任务，不提交审批、不调用 OA/空域系统、不下发 DJI、不写 `flight_events`、不声明天气/空域真实校验已完成。
 - 真实 GIS 数据来源、权威坐标系、更新频率、桩号映射、客户 GIS REST/数据库视图对接和离线 GeoJSON 批量导入仍待确认。
 - U1-F03 仅保存 `geom_json` 和 CRS 元数据，不执行真实 PostGIS 空间计算、自动坐标转换、最近资产匹配或 L2/L3 精确定位。
 - 云端 PostgreSQL 迁移实测已完成；远端通过本机确认的 ED25519 SSH 主机指纹后接入，Docker Hub 直连不可达时使用国内镜像源预拉取同一 `postgres:16-alpine` 镜像。
 
 ## 验收结论
 
-U1-F01 网关契约、开发模拟器和状态机规则级验收通过；U1-F02 设备与机巢台账、U1-F03 GIS 最小资产台账、U1-F04 航线管理的本地自动化验收通过，U1-F02/U1-F03 云端 PostgreSQL 迁移 `upgrade/downgrade/upgrade` 实测通过。当前结果不代表真实 DJI 设备、DJI Cloud API、配套无人机/载荷型号、真实航线上传、真实飞行、生产网络、真实 GIS 数据源或精确空间定位验收通过。
+U1-F01 网关契约、开发模拟器和状态机规则级验收通过；U1-F02 设备与机巢台账、U1-F03 GIS 最小资产台账、U1-F04 航线管理、U1-F05 任务创建的本地自动化验收通过，U1-F02/U1-F03 云端 PostgreSQL 迁移 `upgrade/downgrade/upgrade` 实测通过。当前结果不代表真实 DJI 设备、DJI Cloud API、配套无人机/载荷型号、真实审批、真实航线上传、真实飞行、生产网络、真实 GIS 数据源或精确空间定位验收通过。

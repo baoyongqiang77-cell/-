@@ -502,3 +502,57 @@ class RouteVersionModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
+
+
+class MissionModel(Base):
+    __tablename__ = "missions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('DRAFT', 'PENDING_APPROVAL', 'APPROVED', 'DISPATCHING', "
+            "'DISPATCHED', 'EXECUTING', 'PAUSED', 'RETURNING', 'LOST_LINK', "
+            "'COMPLETED', 'ABORTED', 'MEDIA_SYNCING', 'PARTIAL_MEDIA_READY', "
+            "'MEDIA_READY', 'ANALYSIS_READY', 'CANCELLED', 'REJECTED', 'EXPIRED', "
+            "'DISPATCH_FAILED', 'SYNC_FAILED', 'ARCHIVED')",
+            name="ck_missions_status",
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_missions_tenant_id_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "route_id"],
+            ["routes.tenant_id", "routes.id"],
+            name="fk_missions_tenant_route",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "route_version_id"],
+            ["route_versions.tenant_id", "route_versions.id"],
+            name="fk_missions_tenant_route_version",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "device_id"],
+            ["devices.tenant_id", "devices.id"],
+            name="fk_missions_tenant_device",
+        ),
+        ForeignKeyConstraint(
+            ["dock_id"],
+            ["docks.id"],
+            name="fk_missions_dock",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    route_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    route_version_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    device_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    dock_id: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="DRAFT")
+    schedule_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    inspection_targets: Mapped[list] = mapped_column(JSON, nullable=False)
+    media_policy: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
