@@ -131,11 +131,13 @@ U1-F07 only dispatches through the existing gateway simulator contract. Simulato
 | `flight_events` table with tenant-scoped mission FK and normalized gateway payload columns | PASS |
 | Simulator/normalized telemetry ingestion requires `FLIGHT_CONTROL` and `Idempotency-Key` | PASS |
 | Event payload preserves `schema:flight_event_payload` outer fields: `event_code`, `event_time`, `device_sn`, `raw_payload` | PASS |
-| Telemetry list and WebSocket snapshot are scoped to the current service tenant | PASS |
+| Telemetry list, WebSocket snapshot, and in-process realtime fan-out are scoped to the current service tenant | PASS |
+| Persisted simulator telemetry events are broadcast as typed WebSocket `event` messages | PASS |
+| Tenants without `FLIGHT_CONTROL` receive WebSocket `FEATURE_403` and are not subscribed | PASS |
 | Cross-tenant telemetry access returns `TENANT_404` without revealing resource existence | PASS |
-| U1-F05/F06/F07/F08 API and persistence focused tests total 40 cases | PASS |
+| U1-F05/F06/F07/F08 API and persistence focused tests total 43 cases | PASS |
 
-U1-F08 records simulator or caller-provided normalized telemetry events and exposes a first WebSocket snapshot endpoint. It does not subscribe to real DJI Cloud API topics, does not provide production continuous 1-second telemetry fan-out, does not update mission state from telemetry payloads, and does not implement U1-F09 abnormal event linkage.
+U1-F08 records simulator or caller-provided normalized telemetry events, exposes a WebSocket snapshot endpoint, and provides an in-process simulator realtime fan-out path. It does not subscribe to real DJI Cloud API topics, does not provide distributed production pub/sub or guaranteed 1-second real device telemetry, does not update mission state from telemetry payloads, and does not implement U1-F09 abnormal event linkage.
 
 ## 自动化命令
 
@@ -160,11 +162,11 @@ U1-F08 records simulator or caller-provided normalized telemetry events and expo
 - U1-F05 仅创建 `DRAFT` 任务，不提交审批、不调用 OA/空域系统、不下发 DJI、不写 `flight_events`、不声明天气/空域真实校验已完成。
 - U1-F06 仅实现内置审批流和人工/外部审批追踪字段，不调用真实 OA/空域系统、不下发 DJI、不写 `flight_events`、不声明生产审批联调完成。
 - U1-F07 仅通过现有 DJI 网关模拟器记录下发回执，不直连 DJI Cloud API、不证明真实设备接收或执行、不写 `flight_events`、不声明真实飞行能力完成。
-- U1-F08 仅接收模拟器或调用方提供的规范化遥测事件，不直连 DJI Cloud API、不订阅真实设备遥测主题、不声明 1 秒级连续生产遥测完成。
+- U1-F08 仅接收模拟器或调用方提供的规范化遥测事件，并通过进程内 hub 完成模拟实时推送闭环；不直连 DJI Cloud API、不订阅真实设备遥测主题、不声明 1 秒级连续生产遥测完成。
 - 真实 GIS 数据来源、权威坐标系、更新频率、桩号映射、客户 GIS REST/数据库视图对接和离线 GeoJSON 批量导入仍待确认。
 - U1-F03 仅保存 `geom_json` 和 CRS 元数据，不执行真实 PostGIS 空间计算、自动坐标转换、最近资产匹配或 L2/L3 精确定位。
 - 云端 PostgreSQL 迁移实测已完成；远端通过本机确认的 ED25519 SSH 主机指纹后接入，Docker Hub 直连不可达时使用国内镜像源预拉取同一 `postgres:16-alpine` 镜像。
 
 ## 验收结论
 
-U1-F01 网关契约、开发模拟器和状态机规则级验收通过；U1-F02 设备与机巢台账、U1-F03 GIS 最小资产台账、U1-F04 航线管理、U1-F05 任务创建、U1-F06 内置任务审批、U1-F07 模拟网关任务下发、U1-F08 模拟/规范化遥测事件入库与快照读取的本地自动化验收通过，U1-F02/U1-F03 云端 PostgreSQL 迁移 `upgrade/downgrade/upgrade` 实测通过。当前结果不代表真实 DJI 设备、DJI Cloud API、配套无人机/载荷型号、真实 OA/空域审批、真实航线上传、真实飞行、生产网络、生产连续遥测、真实 GIS 数据源或精确空间定位验收通过。
+U1-F01 网关契约、开发模拟器和状态机规则级验收通过；U1-F02 设备与机巢台账、U1-F03 GIS 最小资产台账、U1-F04 航线管理、U1-F05 任务创建、U1-F06 内置任务审批、U1-F07 模拟网关任务下发、U1-F08 模拟/规范化遥测事件入库、快照读取与进程内实时推送闭环的本地自动化验收通过，U1-F02/U1-F03 云端 PostgreSQL 迁移 `upgrade/downgrade/upgrade` 实测通过。当前结果不代表真实 DJI 设备、DJI Cloud API、配套无人机/载荷型号、真实 OA/空域审批、真实航线上传、真实飞行、生产网络、生产连续遥测、真实 GIS 数据源或精确空间定位验收通过。

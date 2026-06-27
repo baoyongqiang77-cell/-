@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
+from queue import Empty
 import re
 from typing import Literal
 from uuid import uuid4
@@ -55,6 +57,7 @@ from .route_management import (
     route_version_payload,
 )
 from .telemetry_events import TelemetryEventService
+from .telemetry_hub import TelemetryHub, TelemetrySubscription
 
 
 ERROR_STATUS_CODES = {
@@ -404,6 +407,7 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.session_factory = session_factory
+    app.state.telemetry_hub = TelemetryHub()
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
@@ -1465,7 +1469,7 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
             device_sn=payload.device_sn,
             raw_payload=payload.raw_payload,
         )
-        return _run_mission_write(
+        result = _run_mission_write(
             request,
             repo,
             actor,
@@ -1482,6 +1486,12 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
                 meta,
             ),
         )
+        request.app.state.telemetry_hub.broadcast(
+            context.tenant_id,
+            mission_id,
+            {"type": "event", "mission_id": mission_id, "item": result},
+        )
+        return result
 
     @app.websocket("/api/v1/missions/{mission_id}/telemetry/ws")
     async def mission_telemetry_ws(websocket: WebSocket, mission_id: str) -> None:
@@ -1489,6 +1499,8 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
         request_id = f"req_{uuid4().hex[:8]}"
         meta = RequestMeta(request_id, websocket.client.host if websocket.client else None)
         session_factory = websocket.app.state.session_factory
+        hub: TelemetryHub = websocket.app.state.telemetry_hub
+        subscription: TelemetrySubscription | None = None
         with session_factory() as session:
             repo = U0Repository(session)
             try:
@@ -1505,6 +1517,8 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
                         {"feature_code": FeatureCode.FLIGHT_CONTROL.value},
                     )
                 service = TelemetryEventService(session)
+                service.list_events(context.tenant_id, mission_id)
+                subscription = hub.subscribe(context.tenant_id, mission_id)
                 items = service.list_events(context.tenant_id, mission_id)
             except DomainError as exc:
                 await websocket.send_json(
@@ -1517,8 +1531,13 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
                 )
                 await websocket.close()
                 return
-        await websocket.send_json({"mission_id": mission_id, "items": items})
-        await websocket.close()
+        await websocket.send_json(
+            {"type": "snapshot", "mission_id": mission_id, "items": items}
+        )
+        try:
+            await _forward_telemetry(subscription, websocket)
+        finally:
+            hub.unsubscribe(subscription)
 
     @app.post("/api/v1/admin/devices", tags=["U1 device registry"])
     def create_device(
@@ -1675,6 +1694,22 @@ def _resolve_context(
                 code=exc.code,
             )
         raise
+
+
+async def _forward_telemetry(
+    subscription: TelemetrySubscription,
+    websocket: WebSocket,
+) -> None:
+    while True:
+        try:
+            message = await asyncio.to_thread(subscription.queue.get, True, 0.1)
+            await websocket.send_json(message)
+        except Empty:
+            continue
+        except asyncio.CancelledError:
+            return
+        except RuntimeError:
+            return
 
 
 def _actor_from_websocket(websocket: WebSocket, repo: U0Repository) -> Actor:

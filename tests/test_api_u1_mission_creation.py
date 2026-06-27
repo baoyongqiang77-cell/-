@@ -481,8 +481,89 @@ class MissionCreationApiTests(unittest.TestCase):
         ) as websocket:
             snapshot = websocket.receive_json()
 
+        self.assertEqual(snapshot["type"], "snapshot")
         self.assertEqual(snapshot["mission_id"], "ms_a")
         self.assertEqual(snapshot["items"][0]["payload_json"]["raw_payload"]["battery"], 82)
+
+    def test_telemetry_websocket_receives_realtime_hub_event(self):
+        with self.client.websocket_connect(
+            "/api/v1/missions/ms_a/telemetry/ws",
+            headers={"Authorization": "Bearer demo-customer-a"},
+        ) as websocket:
+            snapshot = websocket.receive_json()
+            self.assertEqual(snapshot["type"], "snapshot")
+            self.assertEqual(snapshot["items"], [])
+
+            self.client.app.state.telemetry_hub.broadcast(
+                "t_customer_001",
+                "ms_a",
+                {
+                    "type": "event",
+                    "mission_id": "ms_a",
+                    "item": {
+                        "id": "fe_realtime",
+                        "payload_json": {"raw_payload": {"battery": 79}},
+                    },
+                },
+            )
+            event = websocket.receive_json()
+
+        self.assertEqual(event["type"], "event")
+        self.assertEqual(event["mission_id"], "ms_a")
+        self.assertEqual(event["item"]["id"], "fe_realtime")
+        self.assertEqual(event["item"]["payload_json"]["raw_payload"]["battery"], 79)
+
+    def test_telemetry_post_broadcasts_persisted_event(self):
+        class RecordingHub:
+            def __init__(self):
+                self.messages = []
+
+            def broadcast(self, tenant_id: str, mission_id: str, message: dict) -> None:
+                self.messages.append((tenant_id, mission_id, message))
+
+        hub = RecordingHub()
+        self.client.app.state.telemetry_hub.broadcast = hub.broadcast
+
+        response = self.client.post(
+            "/api/v1/missions/ms_a/telemetry-events",
+            json={
+                "event_code": "telemetry",
+                "event_time": "2026-07-01T09:02:00+00:00",
+                "device_sn": "dock-a",
+                "raw_payload": {"battery": 79, "signal": -60},
+            },
+            headers={
+                "Authorization": "Bearer demo-customer-a",
+                "Idempotency-Key": "telemetry-broadcast-001",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(hub.messages), 1)
+        tenant_id, mission_id, message = hub.messages[0]
+        self.assertEqual(tenant_id, "t_customer_001")
+        self.assertEqual(mission_id, "ms_a")
+        self.assertEqual(message["type"], "event")
+        self.assertEqual(message["item"]["id"], response.json()["id"])
+
+    def test_telemetry_websocket_requires_flight_control_entitlement(self):
+        with self.session_factory() as session:
+            session.execute(
+                delete(TenantFeatureEntitlementModel).where(
+                    TenantFeatureEntitlementModel.tenant_id == "t_customer_001",
+                    TenantFeatureEntitlementModel.feature_code == "FLIGHT_CONTROL",
+                )
+            )
+            session.commit()
+
+        with self.client.websocket_connect(
+            "/api/v1/missions/ms_a/telemetry/ws",
+            headers={"Authorization": "Bearer demo-customer-a"},
+        ) as websocket:
+            error = websocket.receive_json()
+
+        self.assertEqual(error["code"], "FEATURE_403")
+        self.assertEqual(error["details"]["feature_code"], "FLIGHT_CONTROL")
 
     def test_forbidden_server_managed_fields_return_mission_422(self):
         payload = self._payload()
