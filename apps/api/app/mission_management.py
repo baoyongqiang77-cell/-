@@ -8,6 +8,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from drone_inspection.dji_gateway import DispatchMissionCommand, DjiGateway
 from drone_inspection.errors import DomainError
 from drone_inspection.flight import MissionStateMachine
 
@@ -16,6 +17,7 @@ from .models import (
     DeviceModel,
     DockModel,
     MissionApprovalModel,
+    MissionDispatchReceiptModel,
     MissionModel,
     RoadAssetModel,
     RouteModel,
@@ -101,6 +103,27 @@ def approval_payload(item: MissionApprovalModel, mission_status: str) -> dict:
         "decision_comment": item.decision_comment,
         "created_at": item.created_at.isoformat(),
         "updated_at": item.updated_at.isoformat(),
+    }
+
+
+def dispatch_receipt_payload(
+    item: MissionDispatchReceiptModel, mission_status: str
+) -> dict:
+    return {
+        "id": item.id,
+        "tenant_id": item.tenant_id,
+        "mission_id": item.mission_id,
+        "mission_status": mission_status,
+        "device_id": item.device_id,
+        "route_version_id": item.route_version_id,
+        "operation": item.operation,
+        "device_sn": item.device_sn,
+        "accepted": item.accepted,
+        "external_request_id": item.external_request_id,
+        "gateway_mode": item.gateway_mode,
+        "raw_payload": item.raw_payload,
+        "received_at": item.received_at.isoformat(),
+        "created_at": item.created_at.isoformat(),
     }
 
 
@@ -269,6 +292,86 @@ class MissionManagementService:
             tenant_id,
             "POST",
             f"mission-{mission_id}-approval-{approval_id}-{decision.lower()}",
+            idempotency_key,
+            fingerprint,
+            operation,
+        )
+
+    def dispatch_mission(
+        self,
+        actor_id: str,
+        tenant_id: str,
+        mission_id: str,
+        values: dict,
+        idempotency_key: str | None,
+        request_meta: RequestMeta,
+        gateway: DjiGateway,
+    ) -> dict:
+        self.u0.tenant_context(tenant_id)
+        normalized = {"dispatch_note": _optional_str(values.get("dispatch_note"))}
+        fingerprint = self._fingerprint(
+            {
+                "action": "dispatch_mission",
+                "tenant_id": tenant_id,
+                "mission_id": mission_id,
+                **normalized,
+            }
+        )
+
+        def operation() -> dict:
+            mission = self.missions.mission(tenant_id, mission_id)
+            self._require_transition(mission.status, "DISPATCHING")
+            before_status = mission.status
+            device = self._device(tenant_id, mission.device_id)
+            mission.status = "DISPATCHING"
+            command = DispatchMissionCommand(
+                tenant_id=tenant_id,
+                request_id=request_meta.request_id,
+                idempotency_key=idempotency_key or "",
+                device_sn=device.serial_number,
+                mission_id=mission.id,
+                route_version_id=mission.route_version_id,
+            )
+            receipt = gateway.dispatch_mission(command)
+            target_status = "DISPATCHED" if receipt.accepted else "DISPATCH_FAILED"
+            self._require_transition(mission.status, target_status)
+            mission.status = target_status
+            item = MissionDispatchReceiptModel(
+                id=f"mdr_{uuid4().hex[:12]}",
+                tenant_id=tenant_id,
+                mission_id=mission.id,
+                device_id=mission.device_id,
+                route_version_id=mission.route_version_id,
+                operation=receipt.operation,
+                device_sn=receipt.device_sn,
+                accepted=receipt.accepted,
+                external_request_id=receipt.external_request_id,
+                gateway_mode=receipt.mode.value,
+                raw_payload=receipt.raw_payload,
+                received_at=receipt.received_at,
+            )
+            self.session.add(item)
+            self.session.flush()
+            self.u0.audit(
+                tenant_id=tenant_id,
+                actor=actor_id,
+                action=(
+                    "mission_dispatched"
+                    if target_status == "DISPATCHED"
+                    else "mission_dispatch_failed"
+                ),
+                resource_type="mission_dispatch_receipt",
+                resource_id=item.id,
+                request_meta=request_meta,
+                before_status=before_status,
+                after_status=target_status,
+            )
+            return dispatch_receipt_payload(item, mission.status)
+
+        return self.u0.run_idempotent(
+            tenant_id,
+            "POST",
+            f"mission-{mission_id}-dispatch",
             idempotency_key,
             fingerprint,
             operation,

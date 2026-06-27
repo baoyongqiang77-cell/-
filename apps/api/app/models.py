@@ -597,3 +597,39 @@ class MissionApprovalModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
     )
+
+
+class MissionDispatchReceiptModel(Base):
+    __tablename__ = "mission_dispatch_receipts"
+    __table_args__ = (
+        CheckConstraint(
+            "gateway_mode IN ('SIMULATOR', 'REAL')",
+            name="ck_mission_dispatch_receipts_gateway_mode",
+        ),
+        UniqueConstraint(
+            "tenant_id", "id", name="uq_mission_dispatch_receipts_tenant_id_id"
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "mission_id"],
+            ["missions.tenant_id", "missions.id"],
+            name="fk_mission_dispatch_receipts_tenant_mission",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    mission_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    device_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    route_version_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    operation: Mapped[str] = mapped_column(String(64), nullable=False)
+    device_sn: Mapped[str] = mapped_column(String(128), nullable=False)
+    accepted: Mapped[bool] = mapped_column(nullable=False)
+    external_request_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    gateway_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    raw_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )

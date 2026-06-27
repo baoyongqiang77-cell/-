@@ -33,6 +33,7 @@ class MissionModelTests(unittest.TestCase):
     def test_metadata_contains_missions_table(self):
         self.assertIn("missions", Base.metadata.tables)
         self.assertIn("mission_approvals", Base.metadata.tables)
+        self.assertIn("mission_dispatch_receipts", Base.metadata.tables)
 
     def test_mission_model_registers_required_constraints(self):
         models = importlib.import_module("app.models")
@@ -52,6 +53,15 @@ class MissionModelTests(unittest.TestCase):
         self.assertIn("ck_mission_approvals_status", constraints)
         self.assertIn("fk_mission_approvals_tenant_mission", constraints)
 
+    def test_mission_dispatch_receipt_model_registers_required_constraints(self):
+        models = importlib.import_module("app.models")
+        constraints = {
+            item.name for item in models.MissionDispatchReceiptModel.__table__.constraints
+        }
+
+        self.assertIn("ck_mission_dispatch_receipts_gateway_mode", constraints)
+        self.assertIn("fk_mission_dispatch_receipts_tenant_mission", constraints)
+
     def test_alembic_mission_creation_round_trip_sqlite(self):
         with TemporaryDirectory() as temp_dir:
             database_url = f"sqlite+pysqlite:///{Path(temp_dir) / 'test.db'}"
@@ -65,15 +75,21 @@ class MissionModelTests(unittest.TestCase):
                 self.assertIn(
                     "mission_approvals", set(inspect(engine).get_table_names())
                 )
+                self.assertIn(
+                    "mission_dispatch_receipts",
+                    set(inspect(engine).get_table_names()),
+                )
             finally:
                 engine.dispose()
 
-            command.downgrade(config, "20260627_0005")
+            command.downgrade(config, "20260627_0006")
             engine = build_session_factory(database_url).kw["bind"]
             try:
                 self.assertIn("missions", set(inspect(engine).get_table_names()))
+                self.assertIn("mission_approvals", set(inspect(engine).get_table_names()))
                 self.assertNotIn(
-                    "mission_approvals", set(inspect(engine).get_table_names())
+                    "mission_dispatch_receipts",
+                    set(inspect(engine).get_table_names()),
                 )
             finally:
                 engine.dispose()
@@ -370,6 +386,120 @@ class MissionServiceTests(unittest.TestCase):
         self.assertEqual(audit.action, "mission_rejected")
         self.assertEqual(audit.before_status, "PENDING_APPROVAL")
         self.assertEqual(audit.after_status, "REJECTED")
+
+    def _approve_seed_mission(self, session):
+        service_module = importlib.import_module("app.mission_management")
+        service = service_module.MissionManagementService(session)
+        submitted = service.submit_approval(
+            "u_customer_a_operator",
+            "t_customer_001",
+            "ms_a",
+            {"external_system": "BUILT_IN"},
+            "dispatch-submit-approval",
+            RequestMeta("req_dispatch_submit", "127.0.0.1"),
+        )
+        service.decide_approval(
+            "u_customer_a_approver",
+            "t_customer_001",
+            "ms_a",
+            submitted["id"],
+            "APPROVED",
+            {"comment": "approved"},
+            "dispatch-approve-mission",
+            RequestMeta("req_dispatch_approve", "127.0.0.1"),
+        )
+        return service
+
+    def test_dispatches_approved_mission_once_and_records_gateway_receipt(self):
+        service_module = importlib.import_module("app.mission_management")
+        gateway_module = importlib.import_module("drone_inspection.dji_gateway")
+        with self.session_factory() as session:
+            service = self._approve_seed_mission(session)
+            gateway = gateway_module.DjiDock3Simulator()
+            first = service.dispatch_mission(
+                "u_customer_a_operator",
+                "t_customer_001",
+                "ms_a",
+                {"dispatch_note": "start approved patrol"},
+                "mission-dispatch",
+                RequestMeta("req_dispatch", "127.0.0.1"),
+                gateway,
+            )
+            replay = service.dispatch_mission(
+                "u_customer_a_operator",
+                "t_customer_001",
+                "ms_a",
+                {"dispatch_note": "start approved patrol"},
+                "mission-dispatch",
+                RequestMeta("req_dispatch", "127.0.0.1"),
+                gateway,
+            )
+            mission = session.get(MissionModel, "ms_a")
+
+        self.assertEqual(replay, first)
+        self.assertEqual(first["mission_status"], "DISPATCHED")
+        self.assertTrue(first["accepted"])
+        self.assertEqual(first["gateway_mode"], "SIMULATOR")
+        self.assertEqual(first["raw_payload"]["execution_proof"], "SIMULATED_ONLY")
+        self.assertEqual(mission.status, "DISPATCHED")
+
+    def test_dispatch_requires_approved_mission(self):
+        service_module = importlib.import_module("app.mission_management")
+        gateway_module = importlib.import_module("drone_inspection.dji_gateway")
+        with self.session_factory() as session:
+            service = service_module.MissionManagementService(session)
+            with self.assertRaises(DomainError) as raised:
+                service.dispatch_mission(
+                    "u_customer_a_operator",
+                    "t_customer_001",
+                    "ms_a",
+                    {},
+                    "dispatch-draft",
+                    RequestMeta("req_dispatch_draft", "127.0.0.1"),
+                    gateway_module.DjiDock3Simulator(),
+                )
+
+        self.assertEqual(raised.exception.code, "STATE_409")
+
+    def test_dispatch_cross_tenant_mission_returns_tenant_404(self):
+        service_module = importlib.import_module("app.mission_management")
+        gateway_module = importlib.import_module("drone_inspection.dji_gateway")
+        with self.session_factory() as session:
+            service = service_module.MissionManagementService(session)
+            with self.assertRaises(DomainError) as raised:
+                service.dispatch_mission(
+                    "u_customer_b_operator",
+                    "t_customer_002",
+                    "ms_a",
+                    {},
+                    "dispatch-cross-tenant",
+                    RequestMeta("req_dispatch_cross", "127.0.0.1"),
+                    gateway_module.DjiDock3Simulator(),
+                )
+
+        self.assertEqual(raised.exception.code, "TENANT_404")
+
+    def test_dispatch_gateway_failure_returns_dji_502_without_final_state(self):
+        gateway_module = importlib.import_module("drone_inspection.dji_gateway")
+        with self.session_factory() as session:
+            service = self._approve_seed_mission(session)
+            gateway = gateway_module.DjiDock3Simulator()
+            gateway.fail_next("dispatch_mission", "timeout")
+            with self.assertRaises(DomainError) as raised:
+                service.dispatch_mission(
+                    "u_customer_a_operator",
+                    "t_customer_001",
+                    "ms_a",
+                    {},
+                    "dispatch-timeout",
+                    RequestMeta("req_dispatch_timeout", "127.0.0.1"),
+                    gateway,
+                )
+            session.rollback()
+            mission = session.get(MissionModel, "ms_a")
+
+        self.assertEqual(raised.exception.code, "DJI_502")
+        self.assertEqual(mission.status, "APPROVED")
 
 
 if __name__ == "__main__":
