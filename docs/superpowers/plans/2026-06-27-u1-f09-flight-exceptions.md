@@ -56,4 +56,4 @@
 
 - [x] Update U1 report with U1-F09 evidence and limitations.
 - [x] Run `compileall`, migration script syntax check, `git diff --check`, U1 focused tests, U0 persistence tests, and full unittest discovery.
-- [ ] Commit, push branch, and create PR after verification passes.
+- [x] Commit, push branch, and create PR after verification passes.
