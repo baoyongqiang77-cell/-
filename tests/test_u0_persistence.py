@@ -61,6 +61,7 @@ EXPECTED_TABLES = {
     "missions",
     "mission_approvals",
     "mission_dispatch_receipts",
+    "flight_events",
 }
 
 

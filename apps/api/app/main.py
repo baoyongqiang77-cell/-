@@ -1,20 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
+from queue import Empty
 import re
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from drone_inspection.dji_gateway import DjiDock3Simulator
+from drone_inspection.dji_gateway import DjiDock3Simulator, FlightEvent
 from drone_inspection.constants import FeatureCode
 from drone_inspection.errors import DomainError
 from drone_inspection.foundation import TenantContext
@@ -22,6 +24,7 @@ from drone_inspection.foundation import TenantContext
 from .database import build_session_factory, database_url
 from .dependencies import (
     Actor,
+    DEMO_TOKENS,
     actor_from_authorization,
     repository,
     request_meta,
@@ -53,6 +56,8 @@ from .route_management import (
     route_payload,
     route_version_payload,
 )
+from .telemetry_events import TelemetryEventService
+from .telemetry_hub import TelemetryHub, TelemetrySubscription
 
 
 ERROR_STATUS_CODES = {
@@ -75,7 +80,7 @@ ERROR_STATUS_CODES = {
 }
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-EXPECTED_DATABASE_REVISION = "20260627_0007"
+EXPECTED_DATABASE_REVISION = "20260627_0008"
 
 
 class FeatureEntitlementRequest(BaseModel):
@@ -363,6 +368,15 @@ class MissionDispatchRequest(BaseModel):
     dispatch_note: str | None = None
 
 
+class TelemetryEventRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_code: str = Field(min_length=1)
+    event_time: datetime
+    device_sn: str = Field(min_length=1)
+    raw_payload: dict
+
+
 def create_app(database_url_override: str | None = None) -> FastAPI:
     session_factory = build_session_factory(database_url_override or database_url())
 
@@ -393,6 +407,7 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.session_factory = session_factory
+    app.state.telemetry_hub = TelemetryHub()
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
@@ -1414,6 +1429,116 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
             ),
         )
 
+    @app.get("/api/v1/missions/{mission_id}/telemetry-events", tags=["U1 missions"])
+    def list_telemetry_events(
+        mission_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        service = TelemetryEventService(repo.session)
+        try:
+            return {"items": service.list_events(context.tenant_id, mission_id)}
+        except DomainError as exc:
+            _commit_mission_read_denial(
+                request, repo, actor, context, meta, exc, "mission", mission_id
+            )
+            raise
+
+    @app.post("/api/v1/missions/{mission_id}/telemetry-events", tags=["U1 missions"])
+    def record_telemetry_event(
+        mission_id: str,
+        payload: TelemetryEventRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        service = TelemetryEventService(repo.session)
+        event = FlightEvent(
+            event_code=payload.event_code,
+            event_time=payload.event_time,
+            device_sn=payload.device_sn,
+            raw_payload=payload.raw_payload,
+        )
+        result = _run_mission_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "mission",
+            mission_id,
+            lambda: service.record_event(
+                actor.id,
+                context.tenant_id,
+                mission_id,
+                event,
+                idempotency_key,
+                meta,
+            ),
+        )
+        request.app.state.telemetry_hub.broadcast(
+            context.tenant_id,
+            mission_id,
+            {"type": "event", "mission_id": mission_id, "item": result},
+        )
+        return result
+
+    @app.websocket("/api/v1/missions/{mission_id}/telemetry/ws")
+    async def mission_telemetry_ws(websocket: WebSocket, mission_id: str) -> None:
+        await websocket.accept()
+        request_id = f"req_{uuid4().hex[:8]}"
+        meta = RequestMeta(request_id, websocket.client.host if websocket.client else None)
+        session_factory = websocket.app.state.session_factory
+        hub: TelemetryHub = websocket.app.state.telemetry_hub
+        subscription: TelemetrySubscription | None = None
+        with session_factory() as session:
+            repo = U0Repository(session)
+            try:
+                actor = _actor_from_websocket(websocket, repo)
+                context = resolve_tenant_context(
+                    repo,
+                    actor,
+                    websocket.headers.get("X-Tenant-Id"),
+                )
+                if not context.has_feature(FeatureCode.FLIGHT_CONTROL):
+                    raise DomainError(
+                        "FEATURE_403",
+                        "Tenant is not entitled to the requested feature",
+                        {"feature_code": FeatureCode.FLIGHT_CONTROL.value},
+                    )
+                service = TelemetryEventService(session)
+                service.list_events(context.tenant_id, mission_id)
+                subscription = hub.subscribe(context.tenant_id, mission_id)
+                items = service.list_events(context.tenant_id, mission_id)
+            except DomainError as exc:
+                await websocket.send_json(
+                    {
+                        "code": exc.code,
+                        "message": exc.message,
+                        "request_id": request_id,
+                        "details": exc.details,
+                    }
+                )
+                await websocket.close()
+                return
+        await websocket.send_json(
+            {"type": "snapshot", "mission_id": mission_id, "items": items}
+        )
+        try:
+            await _forward_telemetry(subscription, websocket)
+        finally:
+            hub.unsubscribe(subscription)
+
     @app.post("/api/v1/admin/devices", tags=["U1 device registry"])
     def create_device(
         payload: DeviceCreateRequest,
@@ -1569,6 +1694,33 @@ def _resolve_context(
                 code=exc.code,
             )
         raise
+
+
+async def _forward_telemetry(
+    subscription: TelemetrySubscription,
+    websocket: WebSocket,
+) -> None:
+    while True:
+        try:
+            message = await asyncio.to_thread(subscription.queue.get, True, 0.1)
+            await websocket.send_json(message)
+        except Empty:
+            continue
+        except asyncio.CancelledError:
+            return
+        except RuntimeError:
+            return
+
+
+def _actor_from_websocket(websocket: WebSocket, repo: U0Repository) -> Actor:
+    authorization = websocket.headers.get("Authorization")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise DomainError("AUTH_401", "Missing or expired token")
+    token = authorization.removeprefix("Bearer ").strip()
+    user_id = DEMO_TOKENS.get(token)
+    if user_id is None:
+        raise DomainError("AUTH_401", "Missing or expired token")
+    return repo.home_actor(user_id)
 
 
 def _require_roles(
