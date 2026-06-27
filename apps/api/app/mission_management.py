@@ -9,11 +9,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from drone_inspection.errors import DomainError
+from drone_inspection.flight import MissionStateMachine
 
 from .models import (
     BridgeAssetModel,
     DeviceModel,
     DockModel,
+    MissionApprovalModel,
     MissionModel,
     RoadAssetModel,
     RouteModel,
@@ -49,6 +51,22 @@ class MissionRepository:
             raise DomainError("TENANT_404", "Mission does not exist or is not accessible")
         return item
 
+    def approval(
+        self, tenant_id: str, mission_id: str, approval_id: str
+    ) -> MissionApprovalModel:
+        item = self.session.scalar(
+            select(MissionApprovalModel).where(
+                MissionApprovalModel.tenant_id == tenant_id,
+                MissionApprovalModel.mission_id == mission_id,
+                MissionApprovalModel.id == approval_id,
+            )
+        )
+        if item is None:
+            raise DomainError(
+                "TENANT_404", "Mission approval does not exist or is not accessible"
+            )
+        return item
+
 
 def mission_payload(item: MissionModel) -> dict:
     return {
@@ -62,6 +80,25 @@ def mission_payload(item: MissionModel) -> dict:
         "schedule_time": item.schedule_time.isoformat(),
         "inspection_targets": item.inspection_targets,
         "media_policy": item.media_policy,
+        "created_at": item.created_at.isoformat(),
+        "updated_at": item.updated_at.isoformat(),
+    }
+
+
+def approval_payload(item: MissionApprovalModel, mission_status: str) -> dict:
+    return {
+        "id": item.id,
+        "tenant_id": item.tenant_id,
+        "mission_id": item.mission_id,
+        "status": item.status,
+        "mission_status": mission_status,
+        "external_system": item.external_system,
+        "external_id": item.external_id,
+        "external_status": item.external_status,
+        "callback_payload": item.callback_payload,
+        "submitted_by": item.submitted_by,
+        "decided_by": item.decided_by,
+        "decision_comment": item.decision_comment,
         "created_at": item.created_at.isoformat(),
         "updated_at": item.updated_at.isoformat(),
     }
@@ -109,6 +146,132 @@ class MissionManagementService:
 
         return self.u0.run_idempotent(
             tenant_id, "POST", "mission-create", idempotency_key, fingerprint, operation
+        )
+
+    def submit_approval(
+        self,
+        actor_id: str,
+        tenant_id: str,
+        mission_id: str,
+        values: dict,
+        idempotency_key: str | None,
+        request_meta: RequestMeta,
+    ) -> dict:
+        self.u0.tenant_context(tenant_id)
+        normalized = self._normalize_approval(values)
+        fingerprint = self._fingerprint(
+            {
+                "action": "submit_approval",
+                "tenant_id": tenant_id,
+                "mission_id": mission_id,
+                **normalized,
+            }
+        )
+
+        def operation() -> dict:
+            mission = self.missions.mission(tenant_id, mission_id)
+            self._require_transition(mission.status, "PENDING_APPROVAL")
+            before_status = mission.status
+            mission.status = "PENDING_APPROVAL"
+            item = MissionApprovalModel(
+                id=f"ma_{uuid4().hex[:12]}",
+                tenant_id=tenant_id,
+                mission_id=mission.id,
+                status="PENDING_APPROVAL",
+                external_system=normalized["external_system"],
+                external_id=normalized["external_id"],
+                external_status=normalized["external_status"],
+                callback_payload=normalized["callback_payload"],
+                submitted_by=actor_id,
+                decision_comment=normalized["comment"],
+            )
+            self.session.add(item)
+            self.session.flush()
+            self.u0.audit(
+                tenant_id=tenant_id,
+                actor=actor_id,
+                action="mission_approval_submitted",
+                resource_type="mission_approval",
+                resource_id=item.id,
+                request_meta=request_meta,
+                before_status=before_status,
+                after_status="PENDING_APPROVAL",
+            )
+            return approval_payload(item, mission.status)
+
+        return self.u0.run_idempotent(
+            tenant_id,
+            "POST",
+            f"mission-{mission_id}-submit-approval",
+            idempotency_key,
+            fingerprint,
+            operation,
+        )
+
+    def decide_approval(
+        self,
+        actor_id: str,
+        tenant_id: str,
+        mission_id: str,
+        approval_id: str,
+        decision: str,
+        values: dict,
+        idempotency_key: str | None,
+        request_meta: RequestMeta,
+    ) -> dict:
+        if decision not in {"APPROVED", "REJECTED"}:
+            raise DomainError("MISSION_422", "Approval decision is invalid")
+        self.u0.tenant_context(tenant_id)
+        normalized = self._normalize_approval(values)
+        fingerprint = self._fingerprint(
+            {
+                "action": "decide_approval",
+                "tenant_id": tenant_id,
+                "mission_id": mission_id,
+                "approval_id": approval_id,
+                "decision": decision,
+                **normalized,
+            }
+        )
+
+        def operation() -> dict:
+            mission = self.missions.mission(tenant_id, mission_id)
+            approval = self.missions.approval(tenant_id, mission_id, approval_id)
+            if approval.status != "PENDING_APPROVAL":
+                raise DomainError(
+                    "STATE_409",
+                    "Approval has already been decided",
+                    {"current_status": approval.status},
+                )
+            self._require_transition(mission.status, decision)
+            before_status = mission.status
+            mission.status = decision
+            approval.status = decision
+            approval.external_status = normalized["external_status"]
+            approval.external_id = normalized["external_id"] or approval.external_id
+            approval.callback_payload = normalized["callback_payload"]
+            approval.decided_by = actor_id
+            approval.decision_comment = normalized["comment"]
+            self.session.flush()
+            self.u0.audit(
+                tenant_id=tenant_id,
+                actor=actor_id,
+                action="mission_approved" if decision == "APPROVED" else "mission_rejected",
+                resource_type="mission_approval",
+                resource_id=approval.id,
+                request_meta=request_meta,
+                before_status=before_status,
+                after_status=decision,
+            )
+            return approval_payload(approval, mission.status)
+
+        return self.u0.run_idempotent(
+            tenant_id,
+            "POST",
+            f"mission-{mission_id}-approval-{approval_id}-{decision.lower()}",
+            idempotency_key,
+            fingerprint,
+            operation,
         )
 
     def _normalize(self, tenant_id: str, values: dict) -> dict:
@@ -163,6 +326,48 @@ class MissionManagementService:
             "inspection_targets": targets,
             "media_policy": media_policy,
         }
+
+    def _normalize_approval(self, values: dict) -> dict:
+        callback_payload = values.get("callback_payload") or {}
+        if not isinstance(callback_payload, dict):
+            raise DomainError(
+                "MISSION_422",
+                "Approval callback payload is invalid",
+                {"field": "callback_payload"},
+            )
+        external_system = _optional_str(values.get("external_system"))
+        if external_system is not None and external_system not in {
+            "BUILT_IN",
+            "OA",
+            "AIRSPACE",
+            "MANUAL",
+        }:
+            raise DomainError(
+                "MISSION_422",
+                "Approval external system is invalid",
+                {"field": "external_system"},
+            )
+        return {
+            "external_system": external_system,
+            "external_id": _optional_str(values.get("external_id")),
+            "external_status": _optional_str(values.get("external_status")),
+            "callback_payload": callback_payload,
+            "comment": _optional_str(values.get("comment")),
+        }
+
+    @staticmethod
+    def _require_transition(current_status: str, target_status: str) -> None:
+        allowed = MissionStateMachine.ALLOWED.get(current_status, set())
+        if target_status not in allowed:
+            raise DomainError(
+                "STATE_409",
+                "Mission status does not allow this approval action",
+                {
+                    "current_status": current_status,
+                    "target_status": target_status,
+                    "allowed": sorted(allowed),
+                },
+            )
 
     def _route(self, tenant_id: str, route_id: str) -> RouteModel:
         item = self.session.scalar(
@@ -255,3 +460,10 @@ def _require_non_empty(values: dict, fields: tuple[str, ...]) -> None:
                 "Required mission field is empty",
                 {"field": field},
             )
+
+
+def _optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
