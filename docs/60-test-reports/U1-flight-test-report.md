@@ -152,6 +152,20 @@ U1-F08 records simulator or caller-provided normalized telemetry events, exposes
 
 U1-F09 converts selected simulator or normalized `flight_events` into U1 flight-control exception records. It does not create U2 visual-analysis `events`, `event_asset_links`, `review_records`, `feedback_samples`, or `work_orders`; it does not call real DJI Cloud API or prove production abnormal-event topic integration.
 
+### U1-F10 Media Sync
+
+| Check | Result |
+| --- | --- |
+| `media_files` table with tenant-scoped mission FK and one media record per source flight event | PASS |
+| `media_upload_completed` event sync creates `READY` mission media records | PASS |
+| Sync API requires `FLIGHT_CONTROL` and `Idempotency-Key` | PASS |
+| Bad checksum returns `MEDIA_499` | PASS |
+| Unsupported source events return `MISSION_422` | PASS |
+| Cross-tenant media access returns `TENANT_404` without revealing resource existence | PASS |
+| Successful sync writes `media_file_synced` audit records | PASS |
+
+U1-F10 records simulator or normalized DJI media-upload completion events as U1 mission media records. It does not perform U2 media ingest, chunk upload, breakpoint resume, frame extraction, object storage verification, analysis task creation, alert creation, work-order creation, or production DJI media callback verification.
+
 ## 自动化命令
 
 ```powershell

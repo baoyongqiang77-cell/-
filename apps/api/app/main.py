@@ -50,6 +50,7 @@ from .mission_management import (
     MissionRepository,
     mission_payload,
 )
+from .media_sync import MediaSyncService
 from .repositories import RequestMeta, U0Repository
 from .route_management import (
     RouteManagementService,
@@ -81,7 +82,7 @@ ERROR_STATUS_CODES = {
 }
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-EXPECTED_DATABASE_REVISION = "20260627_0009"
+EXPECTED_DATABASE_REVISION = "20260628_0010"
 
 
 class FeatureEntitlementRequest(BaseModel):
@@ -1586,6 +1587,61 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
             "flight_exception",
             flight_event_id,
             lambda: service.link_exception(
+                actor.id,
+                context.tenant_id,
+                mission_id,
+                flight_event_id,
+                idempotency_key,
+                meta,
+            ),
+        )
+
+    @app.get("/api/v1/missions/{mission_id}/media-files", tags=["U1 missions"])
+    def list_mission_media_files(
+        mission_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        service = MediaSyncService(repo.session)
+        try:
+            return {"items": service.list_media_files(context.tenant_id, mission_id)}
+        except DomainError as exc:
+            _commit_mission_read_denial(
+                request, repo, actor, context, meta, exc, "mission", mission_id
+            )
+            raise
+
+    @app.post(
+        "/api/v1/missions/{mission_id}/flight-events/{flight_event_id}/sync-media",
+        tags=["U1 missions"],
+    )
+    def sync_mission_media_file(
+        mission_id: str,
+        flight_event_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        service = MediaSyncService(repo.session)
+        return _run_mission_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "media_file",
+            flight_event_id,
+            lambda: service.sync_media(
                 actor.id,
                 context.tenant_id,
                 mission_id,

@@ -63,6 +63,7 @@ EXPECTED_TABLES = {
     "mission_dispatch_receipts",
     "flight_events",
     "flight_exception_links",
+    "media_files",
 }
 
 

@@ -702,3 +702,49 @@ class FlightExceptionLinkModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
     )
+
+
+class MediaFileModel(Base):
+    __tablename__ = "media_files"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "mission_id"],
+            ["missions.tenant_id", "missions.id"],
+            name="fk_media_files_tenant_mission",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "source_event_id",
+            name="uq_media_files_tenant_source_event",
+        ),
+        CheckConstraint(
+            "media_type IN ('VIDEO', 'IMAGE', 'THUMBNAIL')",
+            name="ck_media_files_media_type",
+        ),
+        CheckConstraint(
+            "status IN ('CAPTURED', 'UPLOADING', 'UPLOAD_FAILED', 'REGISTERING', 'READY', 'REJECTED', 'FRAME_EXTRACTING', 'FRAME_READY', 'ARCHIVED', 'DELETED')",
+            name="ck_media_files_status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    mission_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    device_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_event_id: Mapped[str] = mapped_column(
+        ForeignKey("flight_events.id"), nullable=False
+    )
+    media_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    storage_uri: Mapped[str] = mapped_column(String(512), nullable=False)
+    checksum: Mapped[str] = mapped_column(String(160), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="READY")
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
