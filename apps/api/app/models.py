@@ -717,6 +717,11 @@ class MediaFileModel(Base):
             "source_event_id",
             name="uq_media_files_tenant_source_event",
         ),
+        UniqueConstraint(
+            "tenant_id",
+            "id",
+            name="uq_media_files_tenant_id",
+        ),
         CheckConstraint(
             "media_type IN ('VIDEO', 'IMAGE', 'THUMBNAIL')",
             name="ck_media_files_media_type",

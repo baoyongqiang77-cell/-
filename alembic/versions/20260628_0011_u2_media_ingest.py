@@ -29,6 +29,10 @@ def upgrade() -> None:
             sa.Column("captured_at", sa.DateTime(timezone=True), nullable=True)
         )
         batch.add_column(sa.Column("failure_reason", sa.String(length=512), nullable=True))
+        batch.create_unique_constraint(
+            "uq_media_files_tenant_id",
+            ["tenant_id", "id"],
+        )
 
     op.create_table(
         "media_chunks",
@@ -72,6 +76,7 @@ def downgrade() -> None:
     op.drop_table("media_chunks")
 
     with op.batch_alter_table("media_files") as batch:
+        batch.drop_constraint("uq_media_files_tenant_id", type_="unique")
         batch.drop_column("failure_reason")
         batch.drop_column("captured_at")
         batch.drop_column("size_bytes")

@@ -90,6 +90,7 @@ class MissionModelTests(unittest.TestCase):
 
         self.assertIn("fk_media_files_tenant_mission", constraints)
         self.assertIn("uq_media_files_tenant_source_event", constraints)
+        self.assertIn("uq_media_files_tenant_id", constraints)
         self.assertIn("ck_media_files_status", constraints)
         self.assertIn("ck_media_files_media_type", constraints)
 
