@@ -50,6 +50,7 @@ from .mission_management import (
     MissionRepository,
     mission_payload,
 )
+from .media_ingest import MediaIngestService
 from .media_sync import MediaSyncService
 from .repositories import RequestMeta, U0Repository
 from .route_management import (
@@ -82,7 +83,7 @@ ERROR_STATUS_CODES = {
 }
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-EXPECTED_DATABASE_REVISION = "20260628_0010"
+EXPECTED_DATABASE_REVISION = "20260628_0011"
 
 
 class FeatureEntitlementRequest(BaseModel):
@@ -107,6 +108,31 @@ class TenantDataGrantRequest(BaseModel):
         if self.expires_at <= self.effective_from:
             raise ValueError("expires_at must be later than effective_from")
         return self
+
+
+class MediaChunkIngestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chunk_index: int
+    chunk_total: int
+    size_bytes: int
+    checksum: str
+
+
+class MediaIngestEventRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mission_id: str
+    source_type: str
+    media_id: str
+    media_type: str
+    storage_uri: str
+    checksum: str
+    captured_at: str
+    original_filename: str | None = None
+    mime_type: str
+    size_bytes: int
+    chunks: list[MediaChunkIngestRequest] = Field(default_factory=list)
 
 
 class DeviceCreateRequest(BaseModel):
@@ -1650,6 +1676,76 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
                 meta,
             ),
         )
+
+    @app.post("/api/v1/media/ingest-events", tags=["U2 media"])
+    def ingest_media_event(
+        payload: MediaIngestEventRequest,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(
+            request,
+            repo,
+            actor,
+            context,
+            FeatureCode.VISION_ANALYSIS_RESULT,
+            meta,
+        )
+        service = MediaIngestService(repo.session)
+        return service.ingest_event(
+            actor.id,
+            context.tenant_id,
+            payload.model_dump(),
+            idempotency_key,
+            meta,
+        )
+
+    @app.get("/api/v1/media/files/{media_file_id}", tags=["U2 media"])
+    def get_media_file(
+        media_file_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(
+            request,
+            repo,
+            actor,
+            context,
+            FeatureCode.VISION_ANALYSIS_RESULT,
+            meta,
+        )
+        service = MediaIngestService(repo.session)
+        return service.get_media_file(context.tenant_id, media_file_id)
+
+    @app.get("/api/v1/media/files/{media_file_id}/chunks", tags=["U2 media"])
+    def list_media_chunks(
+        media_file_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(
+            request,
+            repo,
+            actor,
+            context,
+            FeatureCode.VISION_ANALYSIS_RESULT,
+            meta,
+        )
+        service = MediaIngestService(repo.session)
+        return {"items": service.list_chunks(context.tenant_id, media_file_id)}
 
     @app.post("/api/v1/admin/devices", tags=["U1 device registry"])
     def create_device(

@@ -717,6 +717,11 @@ class MediaFileModel(Base):
             "source_event_id",
             name="uq_media_files_tenant_source_event",
         ),
+        UniqueConstraint(
+            "tenant_id",
+            "id",
+            name="uq_media_files_tenant_id",
+        ),
         CheckConstraint(
             "media_type IN ('VIDEO', 'IMAGE', 'THUMBNAIL')",
             name="ck_media_files_media_type",
@@ -734,14 +739,64 @@ class MediaFileModel(Base):
     mission_id: Mapped[str] = mapped_column(String(64), nullable=False)
     device_id: Mapped[str] = mapped_column(String(64), nullable=False)
     source_event_id: Mapped[str] = mapped_column(
-        ForeignKey("flight_events.id"), nullable=False
+        ForeignKey("flight_events.id"), nullable=True
     )
     media_id: Mapped[str] = mapped_column(String(128), nullable=False)
     media_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     storage_uri: Mapped[str] = mapped_column(String(512), nullable=False)
     checksum: Mapped[str] = mapped_column(String(160), nullable=False)
+    original_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    captured_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="READY")
+    failure_reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
     payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class MediaChunkModel(Base):
+    __tablename__ = "media_chunks"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "media_file_id"],
+            ["media_files.tenant_id", "media_files.id"],
+            name="fk_media_chunks_tenant_media_file",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "media_file_id",
+            "chunk_index",
+            name="uq_media_chunks_tenant_media_file_index",
+        ),
+        CheckConstraint(
+            "status IN ('UPLOADED', 'CHECKSUM_FAILED')",
+            name="ck_media_chunks_status",
+        ),
+        CheckConstraint(
+            "chunk_index >= 1 AND chunk_total >= chunk_index",
+            name="ck_media_chunks_index_range",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    media_file_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_total: Mapped[int] = mapped_column(Integer, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    checksum: Mapped[str] = mapped_column(String(160), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )

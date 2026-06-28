@@ -64,6 +64,7 @@ EXPECTED_TABLES = {
     "flight_events",
     "flight_exception_links",
     "media_files",
+    "media_chunks",
 }
 
 
