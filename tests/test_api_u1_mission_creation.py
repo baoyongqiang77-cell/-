@@ -123,14 +123,16 @@ class MissionCreationApiTests(unittest.TestCase):
             "media_policy": {"video": True, "image_interval_sec": 2},
         }
 
-    def _record_telemetry_event(self, event_code: str, key: str) -> dict:
+    def _record_telemetry_event(
+        self, event_code: str, key: str, raw_payload: dict | None = None
+    ) -> dict:
         response = self.client.post(
             "/api/v1/missions/ms_a/telemetry-events",
             json={
                 "event_code": event_code,
                 "event_time": "2026-07-01T09:03:00+00:00",
                 "device_sn": "dock-a",
-                "raw_payload": {"battery": 18, "signal": -70},
+                "raw_payload": raw_payload or {"battery": 18, "signal": -70},
             },
             headers={
                 "Authorization": "Bearer demo-customer-a",
@@ -139,6 +141,24 @@ class MissionCreationApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         return response.json()
+
+    def _record_media_event(
+        self,
+        key: str,
+        raw_payload: dict | None = None,
+        event_code: str = "media_upload_completed",
+    ) -> dict:
+        return self._record_telemetry_event(
+            event_code,
+            key,
+            raw_payload=raw_payload
+            or {
+                "media_id": f"med_{key}",
+                "storage_uri": f"t_customer_001/proj_001/ms_a/media/med_{key}.mp4",
+                "checksum": "sha256:" + "c" * 64,
+                "media_type": "VIDEO",
+            },
+        )
 
     def test_customer_creates_draft_mission_once_and_reads_it(self):
         headers = {
@@ -662,6 +682,107 @@ class MissionCreationApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["code"], "FEATURE_403")
 
+    def test_customer_syncs_and_lists_media_file_once(self):
+        event = self._record_media_event("media-api-ok")
+        headers = {
+            "Authorization": "Bearer demo-customer-a",
+            "Idempotency-Key": "media-api-sync-ok",
+        }
+        first = self.client.post(
+            f"/api/v1/missions/ms_a/flight-events/{event['id']}/sync-media",
+            headers=headers,
+        )
+        replay = self.client.post(
+            f"/api/v1/missions/ms_a/flight-events/{event['id']}/sync-media",
+            headers=headers,
+        )
+        listed = self.client.get(
+            "/api/v1/missions/ms_a/media-files",
+            headers={"Authorization": "Bearer demo-customer-a"},
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(replay.json(), first.json())
+        self.assertEqual(first.json()["status"], "READY")
+        self.assertEqual(first.json()["media_type"], "VIDEO")
+        self.assertEqual(listed.json()["items"][0]["id"], first.json()["id"])
+
+    def test_media_sync_requires_idempotency_key(self):
+        event = self._record_media_event("media-api-no-key")
+        response = self.client.post(
+            f"/api/v1/missions/ms_a/flight-events/{event['id']}/sync-media",
+            headers={"Authorization": "Bearer demo-customer-a"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "IDEMP_409")
+
+    def test_media_sync_unsupported_event_returns_mission_422(self):
+        event = self._record_media_event("media-api-bad-code", event_code="telemetry")
+        response = self.client.post(
+            f"/api/v1/missions/ms_a/flight-events/{event['id']}/sync-media",
+            headers={
+                "Authorization": "Bearer demo-customer-a",
+                "Idempotency-Key": "media-api-bad-code",
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["code"], "MISSION_422")
+
+    def test_media_sync_bad_checksum_returns_media_499(self):
+        event = self._record_media_event(
+            "media-api-bad-checksum",
+            raw_payload={
+                "media_id": "med_bad_checksum",
+                "storage_uri": "t_customer_001/proj_001/ms_a/media/bad.mp4",
+                "checksum": "bad-checksum",
+                "media_type": "VIDEO",
+            },
+        )
+        response = self.client.post(
+            f"/api/v1/missions/ms_a/flight-events/{event['id']}/sync-media",
+            headers={
+                "Authorization": "Bearer demo-customer-a",
+                "Idempotency-Key": "media-api-bad-checksum",
+            },
+        )
+
+        self.assertEqual(response.status_code, 499)
+        self.assertEqual(response.json()["code"], "MEDIA_499")
+
+    def test_media_sync_cross_tenant_does_not_reveal_mission(self):
+        event = self._record_media_event("media-api-cross")
+        response = self.client.post(
+            f"/api/v1/missions/ms_a/flight-events/{event['id']}/sync-media",
+            headers={
+                "Authorization": "Bearer demo-customer-b",
+                "Idempotency-Key": "media-api-cross",
+            },
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "TENANT_404")
+
+    def test_media_sync_requires_flight_control_entitlement(self):
+        self._record_media_event("media-api-feature")
+        with self.session_factory() as session:
+            session.execute(
+                delete(TenantFeatureEntitlementModel).where(
+                    TenantFeatureEntitlementModel.tenant_id == "t_customer_001",
+                    TenantFeatureEntitlementModel.feature_code == "FLIGHT_CONTROL",
+                )
+            )
+            session.commit()
+
+        response = self.client.get(
+            "/api/v1/missions/ms_a/media-files",
+            headers={"Authorization": "Bearer demo-customer-a"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["code"], "FEATURE_403")
+
     def test_forbidden_server_managed_fields_return_mission_422(self):
         payload = self._payload()
         payload["tenant_id"] = "t_customer_002"
@@ -698,6 +819,11 @@ class MissionCreationApiTests(unittest.TestCase):
             paths,
         )
         self.assertIn("/api/v1/missions/{mission_id}/flight-exceptions", paths)
+        self.assertIn(
+            "/api/v1/missions/{mission_id}/flight-events/{flight_event_id}/sync-media",
+            paths,
+        )
+        self.assertIn("/api/v1/missions/{mission_id}/media-files", paths)
 
 
 if __name__ == "__main__":

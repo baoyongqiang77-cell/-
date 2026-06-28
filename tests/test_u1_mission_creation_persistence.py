@@ -38,6 +38,7 @@ class MissionModelTests(unittest.TestCase):
         self.assertIn("mission_dispatch_receipts", Base.metadata.tables)
         self.assertIn("flight_events", Base.metadata.tables)
         self.assertIn("flight_exception_links", Base.metadata.tables)
+        self.assertIn("media_files", Base.metadata.tables)
 
     def test_mission_model_registers_required_constraints(self):
         models = importlib.import_module("app.models")
@@ -83,6 +84,15 @@ class MissionModelTests(unittest.TestCase):
         self.assertIn("ck_flight_exception_links_severity", constraints)
         self.assertIn("ck_flight_exception_links_status", constraints)
 
+    def test_media_file_model_registers_required_constraints(self):
+        models = importlib.import_module("app.models")
+        constraints = {item.name for item in models.MediaFileModel.__table__.constraints}
+
+        self.assertIn("fk_media_files_tenant_mission", constraints)
+        self.assertIn("uq_media_files_tenant_source_event", constraints)
+        self.assertIn("ck_media_files_status", constraints)
+        self.assertIn("ck_media_files_media_type", constraints)
+
     def test_alembic_mission_creation_round_trip_sqlite(self):
         with TemporaryDirectory() as temp_dir:
             database_url = f"sqlite+pysqlite:///{Path(temp_dir) / 'test.db'}"
@@ -104,10 +114,11 @@ class MissionModelTests(unittest.TestCase):
                 self.assertIn(
                     "flight_exception_links", set(inspect(engine).get_table_names())
                 )
+                self.assertIn("media_files", set(inspect(engine).get_table_names()))
             finally:
                 engine.dispose()
 
-            command.downgrade(config, "20260627_0008")
+            command.downgrade(config, "20260627_0009")
             engine = build_session_factory(database_url).kw["bind"]
             try:
                 self.assertIn("missions", set(inspect(engine).get_table_names()))
@@ -116,9 +127,10 @@ class MissionModelTests(unittest.TestCase):
                     "mission_dispatch_receipts", set(inspect(engine).get_table_names())
                 )
                 self.assertIn("flight_events", set(inspect(engine).get_table_names()))
-                self.assertNotIn(
+                self.assertIn(
                     "flight_exception_links", set(inspect(engine).get_table_names())
                 )
+                self.assertNotIn("media_files", set(inspect(engine).get_table_names()))
             finally:
                 engine.dispose()
 
@@ -672,6 +684,120 @@ class MissionServiceTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "TENANT_404")
 
+    def test_syncs_media_upload_event_once_and_lists_it(self):
+        event_id = self._record_media_event(key="media-seed-ok")
+        media_module = importlib.import_module("app.media_sync")
+        with self.session_factory() as session:
+            service = media_module.MediaSyncService(session)
+            first = service.sync_media(
+                "u_customer_a_operator",
+                "t_customer_001",
+                "ms_a",
+                event_id,
+                "media-sync-ok",
+                RequestMeta("req_media_sync_ok", "127.0.0.1"),
+            )
+            replay = service.sync_media(
+                "u_customer_a_operator",
+                "t_customer_001",
+                "ms_a",
+                event_id,
+                "media-sync-ok",
+                RequestMeta("req_media_sync_ok", "127.0.0.1"),
+            )
+            listed = service.list_media_files("t_customer_001", "ms_a")
+
+        self.assertEqual(replay, first)
+        self.assertEqual(first["status"], "READY")
+        self.assertEqual(first["source_event_id"], event_id)
+        self.assertEqual(first["media_type"], "VIDEO")
+        self.assertEqual([item["id"] for item in listed], [first["id"]])
+
+    def test_media_sync_writes_audit(self):
+        event_id = self._record_media_event(key="media-seed-audit")
+        media_module = importlib.import_module("app.media_sync")
+        with self.session_factory() as session:
+            service = media_module.MediaSyncService(session)
+            synced = service.sync_media(
+                "u_customer_a_operator",
+                "t_customer_001",
+                "ms_a",
+                event_id,
+                "media-sync-audit",
+                RequestMeta("req_media_sync_audit", "127.0.0.1"),
+            )
+
+        with self.session_factory() as session:
+            audit = session.scalar(
+                select(AuditLogModel).where(
+                    AuditLogModel.request_id == "req_media_sync_audit"
+                )
+            )
+
+        self.assertEqual(audit.action, "media_file_synced")
+        self.assertEqual(audit.resource_id, synced["id"])
+
+    def test_non_media_event_returns_mission_422(self):
+        event_id = self._record_media_event(
+            event_code="telemetry", key="media-seed-bad-code"
+        )
+        media_module = importlib.import_module("app.media_sync")
+        with self.session_factory() as session:
+            service = media_module.MediaSyncService(session)
+            with self.assertRaises(DomainError) as raised:
+                service.sync_media(
+                    "u_customer_a_operator",
+                    "t_customer_001",
+                    "ms_a",
+                    event_id,
+                    "media-sync-bad-code",
+                    RequestMeta("req_media_bad_code", "127.0.0.1"),
+                )
+
+        self.assertEqual(raised.exception.code, "MISSION_422")
+
+    def test_media_sync_bad_checksum_returns_media_499(self):
+        event_id = self._record_media_event(
+            raw_payload={
+                "media_id": "med_bad",
+                "storage_uri": "t_customer_001/proj_001/ms_a/media/med_bad.mp4",
+                "checksum": "bad-checksum",
+                "media_type": "VIDEO",
+            },
+            key="media-seed-bad-checksum",
+        )
+        media_module = importlib.import_module("app.media_sync")
+        with self.session_factory() as session:
+            service = media_module.MediaSyncService(session)
+            with self.assertRaises(DomainError) as raised:
+                service.sync_media(
+                    "u_customer_a_operator",
+                    "t_customer_001",
+                    "ms_a",
+                    event_id,
+                    "media-sync-bad-checksum",
+                    RequestMeta("req_media_bad_checksum", "127.0.0.1"),
+                )
+
+        self.assertEqual(raised.exception.code, "MEDIA_499")
+
+    def test_media_sync_cross_tenant_mission_returns_tenant_404(self):
+        event_id = self._record_media_event(key="media-seed-cross")
+        media_module = importlib.import_module("app.media_sync")
+        with self.session_factory() as session:
+            service = media_module.MediaSyncService(session)
+            with self.assertRaises(DomainError) as raised:
+                service.sync_media(
+                    "u_customer_b_operator",
+                    "t_customer_002",
+                    "ms_a",
+                    event_id,
+                    "media-sync-cross",
+                    RequestMeta("req_media_cross", "127.0.0.1"),
+                )
+
+        self.assertEqual(raised.exception.code, "TENANT_404")
+
     def _record_flight_event(self, event_code: str, mission_id: str = "ms_a") -> str:
         telemetry_module = importlib.import_module("app.telemetry_events")
         event = FlightEvent(
@@ -689,6 +815,39 @@ class MissionServiceTests(unittest.TestCase):
                 event,
                 f"telemetry-{event_code}-{mission_id}",
                 RequestMeta(f"req_telemetry_{event_code}", "127.0.0.1"),
+            )
+        return result["id"]
+
+    def _record_media_event(
+        self,
+        *,
+        event_code: str = "media_upload_completed",
+        raw_payload: dict | None = None,
+        mission_id: str = "ms_a",
+        key: str = "media-seed",
+    ) -> str:
+        telemetry_module = importlib.import_module("app.telemetry_events")
+        event = FlightEvent(
+            event_code=event_code,
+            event_time=datetime(2026, 7, 1, 9, 3, tzinfo=timezone.utc),
+            device_sn="dock-a",
+            raw_payload=raw_payload
+            or {
+                "media_id": "med_001",
+                "storage_uri": "t_customer_001/proj_001/ms_a/media/med_001.mp4",
+                "checksum": "sha256:" + "b" * 64,
+                "media_type": "VIDEO",
+            },
+        )
+        with self.session_factory() as session:
+            service = telemetry_module.TelemetryEventService(session)
+            result = service.record_event(
+                "u_customer_a_operator",
+                "t_customer_001",
+                mission_id,
+                event,
+                key,
+                RequestMeta(f"req_{key}", "127.0.0.1"),
             )
         return result["id"]
 
