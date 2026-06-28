@@ -36,6 +36,7 @@ from .device_registry import (
     device_payload,
     dock_payload,
 )
+from .flight_exceptions import FlightExceptionService
 from .gis_assets import (
     GisAssetRepository,
     GisAssetService,
@@ -80,7 +81,7 @@ ERROR_STATUS_CODES = {
 }
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-EXPECTED_DATABASE_REVISION = "20260627_0008"
+EXPECTED_DATABASE_REVISION = "20260627_0009"
 
 
 class FeatureEntitlementRequest(BaseModel):
@@ -1538,6 +1539,61 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
             await _forward_telemetry(subscription, websocket)
         finally:
             hub.unsubscribe(subscription)
+
+    @app.get("/api/v1/missions/{mission_id}/flight-exceptions", tags=["U1 missions"])
+    def list_flight_exceptions(
+        mission_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        service = FlightExceptionService(repo.session)
+        try:
+            return {"items": service.list_exceptions(context.tenant_id, mission_id)}
+        except DomainError as exc:
+            _commit_mission_read_denial(
+                request, repo, actor, context, meta, exc, "mission", mission_id
+            )
+            raise
+
+    @app.post(
+        "/api/v1/missions/{mission_id}/flight-events/{flight_event_id}/link-exception",
+        tags=["U1 missions"],
+    )
+    def link_flight_exception(
+        mission_id: str,
+        flight_event_id: str,
+        request: Request,
+        actor: Actor = Depends(actor_from_authorization),
+        repo: U0Repository = Depends(repository),
+        meta: RequestMeta = Depends(request_meta),
+        x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict:
+        context = _resolve_context(request, repo, actor, x_tenant_id, meta)
+        _require_feature(request, repo, actor, context, FeatureCode.FLIGHT_CONTROL, meta)
+        service = FlightExceptionService(repo.session)
+        return _run_mission_write(
+            request,
+            repo,
+            actor,
+            context,
+            meta,
+            "flight_exception",
+            flight_event_id,
+            lambda: service.link_exception(
+                actor.id,
+                context.tenant_id,
+                mission_id,
+                flight_event_id,
+                idempotency_key,
+                meta,
+            ),
+        )
 
     @app.post("/api/v1/admin/devices", tags=["U1 device registry"])
     def create_device(
